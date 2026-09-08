@@ -5,7 +5,13 @@ from pathlib import Path
 import pytest
 
 from autodev.config import Settings
+
+from autodev.runner import (CheckResult, RunFailure, VerificationCommand, redact)
 from autodev.workspace import workspace_mount
+
+
+def command(name: str, code: int) -> CheckResult:
+    return CheckResult(VerificationCommand(name, ("tool", name)), code, "failure sk-abcdefghijklmnop")
 
 
 def settings(*, fallback: bool = False) -> Settings:
