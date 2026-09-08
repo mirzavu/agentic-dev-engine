@@ -1,0 +1,14 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+generated-apps/
+reports/
+.env.*
+!.env.example
+.playwright-cli/
+workspace/
+output/
+node_modules/
+dist/
+*.egg-info/
