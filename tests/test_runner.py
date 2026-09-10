@@ -6,7 +6,7 @@ import pytest
 
 from autodev.config import Settings
 
-from autodev.runner import (CheckResult, RunFailure, VerificationCommand, load_verification_manifest, redact)
+from autodev.runner import (CheckResult, RunFailure, VerificationCommand, load_verification_manifest, redact, safe_workspace)
 from autodev.workspace import workspace_mount
 
 
@@ -34,6 +34,12 @@ def test_manifest_rejects_missing_install(tmp_path):
     (tmp_path / "README.md").write_text("pytest")
     with pytest.raises(RunFailure):
         load_verification_manifest(tmp_path)
+
+
+def test_existing_workspace_is_never_reset(tmp_path):
+    (tmp_path / "keep.txt").write_text("keep")
+    with pytest.raises(RunFailure, match="Refusing"):
+        safe_workspace(tmp_path)
 
 
 def test_mount_contains_only_workspace(tmp_path):

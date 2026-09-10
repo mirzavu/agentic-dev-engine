@@ -88,3 +88,25 @@ def verify_in_workspace(workspace, app: Path, commands: list[VerificationCommand
         if not check.passed:
             break
     return results
+
+
+def new_workspace(root: Path, requirement: str) -> Path:
+    slug = re.sub(r"[^a-z0-9]+", "-", requirement.lower()).strip("-")[:40] or "application"
+    path = root / f"{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}-{slug}"
+    path.mkdir(parents=True, exist_ok=False)
+    path.chmod(0o777)  # sandbox user differs from the host user; normalized afterward
+    return path
+
+
+def safe_workspace(path: Path, *, allow_plan_only: bool = False, allow_existing: bool = False) -> Path:
+    path = path.resolve()
+    if not path.exists():
+        path.mkdir(parents=True)
+        path.chmod(0o777)
+        return path
+    entries = {item.name for item in path.iterdir()}
+    allowed = {"TASK.md", ".autodev", ".agents_tmp", ".git", "conversations"} if allow_plan_only else set()
+    if entries - allowed and not allow_existing:
+        raise RunFailure(f"Refusing to alter existing non-empty workspace: {path}")
+    path.chmod(0o777)
+    return path
