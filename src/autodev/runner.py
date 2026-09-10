@@ -74,3 +74,17 @@ def load_verification_manifest(app: Path) -> list[VerificationCommand]:
     if not readme.is_file() or test_line not in readme.read_text(errors="replace"):
         raise RunFailure(f"README.md must document the test command: {test_line}")
     return commands
+
+
+def verify_in_workspace(workspace, app: Path, commands: list[VerificationCommand], *, command_timeout: float = 600.0) -> list[CheckResult]:
+    results: list[CheckResult] = []
+    for command in commands:
+        result = workspace.execute_command(
+            f"cd /workspace && {shlex.join(command.argv)}", timeout=command_timeout
+        )
+        output = (getattr(result, "stdout", "") or "") + (getattr(result, "stderr", "") or "")
+        check = CheckResult(command, int(getattr(result, "exit_code", 1)), output[-12000:])
+        results.append(check)
+        if not check.passed:
+            break
+    return results
