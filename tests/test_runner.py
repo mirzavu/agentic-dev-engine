@@ -6,7 +6,7 @@ import pytest
 
 from autodev.config import Settings
 
-from autodev.runner import (CheckResult, RunFailure, VerificationCommand, redact)
+from autodev.runner import (CheckResult, RunFailure, VerificationCommand, load_verification_manifest, redact)
 from autodev.workspace import workspace_mount
 
 
@@ -16,6 +16,24 @@ def command(name: str, code: int) -> CheckResult:
 
 def settings(*, fallback: bool = False) -> Settings:
     return Settings("agent", None, Path("/missing/auth.json"), 2, 3, 60, 10, 10, 30, 3, 8, fallback)
+
+
+def test_manifest_requires_documented_test_command(tmp_path):
+    (tmp_path / ".autodev").mkdir()
+    (tmp_path / ".autodev" / "verification.json").write_text(json.dumps({
+        "install": ["npm", "install"], "test": ["npm", "test"], "build": ["npm", "run", "build"],
+    }))
+    (tmp_path / "README.md").write_text("Run `npm test`.")
+    commands = load_verification_manifest(tmp_path)
+    assert [item.name for item in commands] == ["install", "test", "build"]
+
+
+def test_manifest_rejects_missing_install(tmp_path):
+    (tmp_path / ".autodev").mkdir()
+    (tmp_path / ".autodev" / "verification.json").write_text('{"test": ["pytest"]}')
+    (tmp_path / "README.md").write_text("pytest")
+    with pytest.raises(RunFailure):
+        load_verification_manifest(tmp_path)
 
 
 def test_mount_contains_only_workspace(tmp_path):
