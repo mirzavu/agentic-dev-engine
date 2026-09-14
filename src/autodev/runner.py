@@ -24,6 +24,18 @@ from .workspace import LoopbackDockerWorkspace, available_loopback_port, normali
 
 class RunFailure(RuntimeError):
     pass
+GIT_RUNTIME_EXCLUDES = (
+    ".agents_tmp/",
+    "conversations/",
+    "bash_events/",
+    ".autodev/visual-review.json",
+    ".autodev/visual-review-history.json",
+    ".autodev/visual/",
+    "node_modules/",
+    "dist/",
+    "playwright-report/",
+    "test-results/",
+)
 
 
 @dataclass(frozen=True)
@@ -96,6 +108,30 @@ def new_workspace(root: Path, requirement: str) -> Path:
     path.mkdir(parents=True, exist_ok=False)
     path.chmod(0o777)  # sandbox user differs from the host user; normalized afterward
     return path
+
+
+def initialize_git_repository(app: Path) -> None:
+    """Create an application-local Git history without using host-global config."""
+    inside = subprocess.run(
+        ["git", "-C", str(app), "rev-parse", "--is-inside-work-tree"],
+        text=True, capture_output=True, check=False,
+    )
+    if inside.returncode:
+        result = subprocess.run(["git", "-C", str(app), "init"], text=True, capture_output=True, check=False)
+        if result.returncode:
+            raise RunFailure(f"Could not initialize application Git repository: {result.stderr.strip()}")
+    for key, value in (("user.name", "Autodev"), ("user.email", "autodev@local")):
+        result = subprocess.run(
+            ["git", "-C", str(app), "config", key, value], text=True, capture_output=True, check=False,
+        )
+        if result.returncode:
+            raise RunFailure(f"Could not configure application Git repository: {result.stderr.strip()}")
+    exclude_file = app / ".git" / "info" / "exclude"
+    existing = exclude_file.read_text() if exclude_file.is_file() else ""
+    additions = [pattern for pattern in GIT_RUNTIME_EXCLUDES if pattern not in existing.splitlines()]
+    if additions:
+        exclude_file.parent.mkdir(parents=True, exist_ok=True)
+        exclude_file.write_text(existing.rstrip() + "\n" + "\n".join(additions) + "\n")
 
 
 def safe_workspace(path: Path, *, allow_plan_only: bool = False, allow_existing: bool = False) -> Path:
