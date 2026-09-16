@@ -6,7 +6,7 @@ import pytest
 
 from autodev.config import Settings
 
-from autodev.runner import (CheckResult, RunFailure, VerificationCommand, load_verification_manifest, redact, safe_workspace)
+from autodev.runner import (CheckResult, RunFailure, VerificationCommand, git_checkpoint, load_verification_manifest, redact, safe_workspace)
 from autodev.workspace import workspace_mount
 
 
@@ -45,6 +45,22 @@ def test_existing_workspace_is_never_reset(tmp_path):
 def test_mount_contains_only_workspace(tmp_path):
     assert workspace_mount(tmp_path).endswith(":/workspace:rw")
     assert str(tmp_path.resolve()) in workspace_mount(tmp_path)
+
+
+def test_git_checkpoint_commits_source_without_runtime_state(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / ".autodev").mkdir()
+    (tmp_path / "src" / "app.ts").write_text("export {}\n")
+    (tmp_path / ".autodev" / "visual-review.json").write_text("{}")
+
+    commit = git_checkpoint(tmp_path, "feat: add app")
+
+    assert commit
+    files = subprocess.run(
+        ["git", "-C", str(tmp_path), "show", "--format=", "--name-only", "HEAD"],
+        text=True, capture_output=True, check=True,
+    ).stdout.splitlines()
+    assert files == ["src/app.ts"]
 
 
 def test_permission_normalization_is_networkless_and_symlink_safe(monkeypatch, tmp_path):

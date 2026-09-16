@@ -134,6 +134,48 @@ def initialize_git_repository(app: Path) -> None:
         exclude_file.write_text(existing.rstrip() + "\n" + "\n".join(additions) + "\n")
 
 
+def git_checkpoint(app: Path, message: str) -> str | None:
+    """Commit source changes after an autonomous stage, excluding runtime state."""
+    initialize_git_repository(app)
+    stage = subprocess.run(
+        ["git", "-C", str(app), "add", "-A", "--", "."],
+        text=True, capture_output=True, check=False,
+    )
+    if stage.returncode:
+        raise RunFailure(f"Could not stage application checkpoint: {stage.stderr.strip()}")
+    changed = subprocess.run(
+        ["git", "-C", str(app), "diff", "--cached", "--quiet"],
+        text=True, capture_output=True, check=False,
+    )
+    if changed.returncode == 0:
+        return None
+    if changed.returncode != 1:
+        raise RunFailure(f"Could not inspect application checkpoint: {changed.stderr.strip()}")
+    commit = subprocess.run(
+        ["git", "-C", str(app), "commit", "-m", message], text=True, capture_output=True, check=False,
+    )
+    if commit.returncode:
+        raise RunFailure(f"Could not commit application checkpoint: {commit.stderr.strip()}")
+    return subprocess.run(
+        ["git", "-C", str(app), "rev-parse", "--short", "HEAD"],
+        text=True, capture_output=True, check=True,
+    ).stdout.strip()
+
+
+def git_status_snapshot(app: Path) -> str | None:
+    if not (app / ".git").is_dir():
+        return None
+    result = subprocess.run(
+        ["git", "-C", str(app), "status", "--porcelain", "--untracked-files=normal"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode:
+        return None
+    return result.stdout
+
+
 def safe_workspace(path: Path, *, allow_plan_only: bool = False, allow_existing: bool = False) -> Path:
     path = path.resolve()
     if not path.exists():
