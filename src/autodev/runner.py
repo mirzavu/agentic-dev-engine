@@ -36,6 +36,9 @@ GIT_RUNTIME_EXCLUDES = (
     "playwright-report/",
     "test-results/",
 )
+CONTAINER_OPENHANDS_STATE_DIR = "/home/openhands/.openhands"
+CONTAINER_OPENHANDS_UID = 10001
+CONTAINER_OPENHANDS_GID = 10001
 
 
 @dataclass(frozen=True)
@@ -174,6 +177,49 @@ def git_status_snapshot(app: Path) -> str | None:
     if result.returncode:
         return None
     return result.stdout
+
+
+def _chown_with_docker(path: Path, uid: int, gid: int) -> None:
+    mount = f"{path.resolve()}:/target:rw"
+    result = subprocess.run(
+        ["docker", "run", "--rm", "--network", "none", "--user", "0:0", "-v", mount,
+         "alpine:3.20", "chown", "-R", f"{uid}:{gid}", "/target"],
+        text=True, capture_output=True, check=False,
+    )
+    if result.returncode:
+        raise RunFailure("Could not prepare temporary OpenHands subscription credentials")
+
+
+@contextmanager
+def openhands_auth_volumes(driver: AgentDriver) -> Iterator[list[str]]:
+    settings = getattr(driver, "settings", None)
+    if getattr(settings, "agent_kind", None) != "agent":
+        yield []
+        return
+    source = Path.home() / ".openhands" / "auth" / "openai_oauth.json"
+    try:
+        content = source.read_text()
+        if not isinstance(json.loads(content), dict):
+            raise ValueError("credential root is not an object")
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise RunFailure("OpenHands subscription credentials are unavailable; run `uv run autodev login`") from exc
+    temp = tempfile.TemporaryDirectory(prefix="autodev-openhands-auth-")
+    temp_path = Path(temp.name)
+    try:
+        auth_dir = temp_path / "auth"
+        auth_dir.mkdir()
+        temp_path.chmod(0o700)
+        auth_dir.chmod(0o700)
+        copied = auth_dir / "openai_oauth.json"
+        copied.write_text(content)
+        copied.chmod(0o600)
+        _chown_with_docker(temp_path, CONTAINER_OPENHANDS_UID, CONTAINER_OPENHANDS_GID)
+        yield [f"{temp_path.resolve()}:{CONTAINER_OPENHANDS_STATE_DIR}:rw"]
+    finally:
+        try:
+            _chown_with_docker(temp_path, os.getuid(), os.getgid())
+        finally:
+            temp.cleanup()
 
 
 def safe_workspace(path: Path, *, allow_plan_only: bool = False, allow_existing: bool = False) -> Path:
