@@ -79,3 +79,28 @@ def test_permission_normalization_is_networkless_and_symlink_safe(monkeypatch, t
     assert "find -P /workspace" in command[command.index("sh") + 2]
     assert "chown -h" in command[command.index("sh") + 2]
     assert "/workspace/node_modules" in command[command.index("sh") + 2]
+
+
+def test_sandbox_access_preserves_dependency_bin_execution(tmp_path):
+    dependency_bin = tmp_path / "node_modules" / "tool" / "bin"
+    dependency_bin.mkdir(parents=True)
+    executable = dependency_bin / "tool.js"
+    executable.write_text("#!/usr/bin/env node\n")
+    package_bin = tmp_path / "node_modules" / ".bin"
+    package_bin.mkdir()
+    direct_target = tmp_path / "node_modules" / "vitest" / "vitest.mjs"
+    direct_target.parent.mkdir()
+    direct_target.write_text("#!/usr/bin/env node\n")
+    direct_target.chmod(0o666)
+    (package_bin / "vitest").symlink_to("../vitest/vitest.mjs")
+    native_executable = tmp_path / "node_modules" / "@typescript" / "typescript-linux-x64" / "lib" / "tsc"
+    native_executable.parent.mkdir(parents=True)
+    native_executable.write_bytes(b"\x7fELFnative compiler")
+    native_executable.chmod(0o666)
+
+    from autodev.runner import grant_sandbox_access
+    grant_sandbox_access(tmp_path)
+
+    assert executable.stat().st_mode & 0o111 == 0o111
+    assert direct_target.stat().st_mode & 0o111 == 0o111
+    assert native_executable.stat().st_mode & 0o111 == 0o111

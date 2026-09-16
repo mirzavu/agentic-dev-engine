@@ -188,3 +188,51 @@ def safe_workspace(path: Path, *, allow_plan_only: bool = False, allow_existing:
         raise RunFailure(f"Refusing to alter existing non-empty workspace: {path}")
     path.chmod(0o777)
     return path
+
+
+def dependency_file_needs_execute(path: Path) -> bool:
+    try:
+        header = path.read_bytes()[:4]
+    except OSError:
+        return False
+    return header.startswith(b"#!") or header.startswith(b"\x7fELF") or header.startswith(b"MZ")
+
+
+def grant_sandbox_access(app: Path) -> None:
+    """Temporarily permit the non-root agent-server user to access this mount."""
+    for path in [app, *app.rglob("*")]:
+        mode = path.lstat().st_mode
+        if stat.S_ISLNK(mode):
+            continue
+        if stat.S_ISDIR(mode):
+            path.chmod(0o777)
+        elif stat.S_ISREG(mode):
+            path.chmod(stat.S_IMODE(mode) | 0o666)
+    # Package-manager command shims resolve into dependency `bin` files. The
+    # sandbox user is not the host owner, so those specific scripts must remain
+    # executable even though ordinary application files remain non-executable.
+    dependencies = app / "node_modules"
+    if dependencies.is_dir():
+        for path in dependencies.rglob("bin"):
+            if not path.is_dir() or path.is_symlink():
+                continue
+            for script in path.iterdir():
+                if script.is_symlink() or not script.is_file():
+                    continue
+                script.chmod(stat.S_IMODE(script.stat().st_mode) | 0o111)
+        for executable in dependencies.rglob("*"):
+            if executable.is_symlink() or not executable.is_file():
+                continue
+            if dependency_file_needs_execute(executable):
+                executable.chmod(stat.S_IMODE(executable.stat().st_mode) | 0o111)
+        package_bins = dependencies / ".bin"
+        if package_bins.is_dir():
+            for shim in package_bins.iterdir():
+                if not shim.is_symlink():
+                    continue
+                try:
+                    target = shim.resolve(strict=True)
+                except OSError:
+                    continue
+                if target.is_file() and dependencies.resolve() in target.parents:
+                    target.chmod(stat.S_IMODE(target.stat().st_mode) | 0o111)
