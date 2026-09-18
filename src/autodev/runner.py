@@ -111,6 +111,36 @@ class AgentDriver(Protocol):
     def review_visual(self, workspace, prompt: str, timeout: float) -> None: ...
 
 
+class OpenHandsDriver:
+    def __init__(self, settings: Settings):
+        self.settings = settings
+
+    @property
+    def model(self) -> str:
+        return self.settings.codex_model or "gpt-5.5"
+
+    def _codex_auth_json(self) -> str:
+        try:
+            content = self.settings.codex_auth_path.read_text()
+            if not isinstance(json.loads(content), dict):
+                raise ValueError("credential root is not an object")
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise RunFailure(
+                "Codex subscription credentials are unavailable; run `codex login` on the host"
+            ) from exc
+        return content
+
+    def secrets_to_redact(self) -> list[str]:
+        if self.settings.agent_kind == "agent":
+            return []
+        try:
+            content = self._codex_auth_json()
+            values = json.loads(content)
+        except RunFailure:
+            return []
+        return [content, *[value for value in values.values() if isinstance(value, str)]]
+
+
 def new_workspace(root: Path, requirement: str) -> Path:
     slug = re.sub(r"[^a-z0-9]+", "-", requirement.lower()).strip("-")[:40] or "application"
     path = root / f"{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}-{slug}"
