@@ -105,6 +105,12 @@ def verify_in_workspace(workspace, app: Path, commands: list[VerificationCommand
     return results
 
 
+class AgentDriver(Protocol):
+    def plan(self, workspace, requirement: str, timeout: float) -> None: ...
+    def develop(self, workspace, prompt: str, timeout: float) -> None: ...
+    def review_visual(self, workspace, prompt: str, timeout: float) -> None: ...
+
+
 def new_workspace(root: Path, requirement: str) -> Path:
     slug = re.sub(r"[^a-z0-9]+", "-", requirement.lower()).strip("-")[:40] or "application"
     path = root / f"{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}-{slug}"
@@ -177,6 +183,14 @@ def git_status_snapshot(app: Path) -> str | None:
     if result.returncode:
         return None
     return result.stdout
+
+
+def agent_turn_timeout(driver: AgentDriver, deadline: float) -> float:
+    remaining = max(1, deadline - time.monotonic())
+    configured = getattr(getattr(driver, "settings", None), "model_timeout_seconds", None)
+    if isinstance(configured, int | float) and configured > 0:
+        return min(remaining, float(configured))
+    return remaining
 
 
 def _chown_with_docker(path: Path, uid: int, gid: int) -> None:
@@ -282,3 +296,8 @@ def grant_sandbox_access(app: Path) -> None:
                     continue
                 if target.is_file() and dependencies.resolve() in target.parents:
                     target.chmod(stat.S_IMODE(target.stat().st_mode) | 0o111)
+
+
+def secrets_to_redact(driver: AgentDriver) -> list[str]:
+    getter = getattr(driver, "secrets_to_redact", None)
+    return getter() if callable(getter) else []
