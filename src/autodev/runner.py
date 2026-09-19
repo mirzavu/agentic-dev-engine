@@ -140,6 +140,29 @@ class OpenHandsDriver:
             return []
         return [content, *[value for value in values.values() if isinstance(value, str)]]
 
+    def _agent(self, prompt_timeout: float, *, planning: bool = False):
+        if self.settings.agent_kind == "agent":
+            from openhands.sdk import LLM
+            from openhands.tools.preset.default import get_default_agent
+            from openhands.tools.preset.planning import get_planning_agent
+
+            llm = LLM.subscription_login(
+                vendor="openai",
+                model=self.model,
+                open_browser=False,
+                timeout=int(max(1, prompt_timeout)),
+            )
+            return get_planning_agent(llm) if planning else get_default_agent(llm=llm)
+
+        from openhands.sdk.settings.model import ACPAgentSettings
+        return ACPAgentSettings(
+            acp_server="codex",
+            acp_model=self.model,
+            acp_prompt_timeout=max(1, prompt_timeout),
+            acp_startup_timeout=self.settings.model_timeout_seconds,
+            acp_isolate_data_dir=True,
+        ).create_agent()
+
 
 def new_workspace(root: Path, requirement: str) -> Path:
     slug = re.sub(r"[^a-z0-9]+", "-", requirement.lower()).strip("-")[:40] or "application"
