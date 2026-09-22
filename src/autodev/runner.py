@@ -193,6 +193,22 @@ class OpenHandsDriver:
         finally:
             conversation.close()
 
+    def plan(self, workspace, requirement: str, timeout: float) -> None:
+        self._run(
+            self._agent(timeout, planning=True), workspace,
+            "Create the implementation plan for this requirement. Write it to /workspace/.agents_tmp/PLAN.md "
+            "and ensure it explicitly includes application goal, chosen stack, required features, "
+            "implementation steps, acceptance criteria, and testing approach. Do not implement code. "
+            "IMPORTANT: The UI/UX design is a core requirement, not an afterthought. Treat the user interface like a custom home renovation—do not settle for generic default templates. Ensure the implementation steps in the plan explicitly define a comprehensive design system (theme, fonts, custom CSS, layout, spacing, animations, responsive design, and product character/identity) and detail how each UI component will be crafted with high aesthetic standards.\n\n"
+            f"Requirement:\n{requirement}", timeout,
+        )
+
+    def develop(self, workspace, prompt: str, timeout: float) -> None:
+        self._run(self._agent(timeout), workspace, prompt, timeout)
+
+    def review_visual(self, workspace, prompt: str, timeout: float) -> None:
+        self._run(self._agent(timeout), workspace, prompt, timeout)
+
 
 def new_workspace(root: Path, requirement: str) -> Path:
     slug = re.sub(r"[^a-z0-9]+", "-", requirement.lower()).strip("-")[:40] or "application"
