@@ -163,6 +163,36 @@ class OpenHandsDriver:
             acp_isolate_data_dir=True,
         ).create_agent()
 
+    def _run(self, agent, workspace, message: str, timeout: float) -> None:
+        from openhands.sdk import Conversation
+        from openhands.sdk.conversation.exceptions import ConversationRunError
+        from openhands.sdk.event.conversation_error import ConversationErrorEvent
+
+        errors: list[ConversationErrorEvent] = []
+
+        def on_event(event) -> None:
+            if isinstance(event, ConversationErrorEvent):
+                errors.append(event)
+
+        conversation = Conversation(
+            agent=agent,
+            workspace=workspace,
+            persistence_dir=None,
+            callbacks=[on_event],
+            max_iteration_per_run=self.settings.max_iterations,
+            secrets={} if self.settings.agent_kind == "agent" else {"CODEX_AUTH_JSON": self._codex_auth_json()},
+        )
+        try:
+            conversation.send_message(message)
+            conversation.run(timeout=max(1, timeout))
+        except ConversationRunError as exc:
+            error = exc.conversation_error or (errors[-1] if errors else None)
+            if error:
+                raise RunFailure(f"OpenHands {self.settings.agent_kind} failed: {error.code}: {error.detail}") from exc
+            raise RunFailure(f"OpenHands {self.settings.agent_kind} failed: {exc}") from exc
+        finally:
+            conversation.close()
+
 
 def new_workspace(root: Path, requirement: str) -> Path:
     slug = re.sub(r"[^a-z0-9]+", "-", requirement.lower()).strip("-")[:40] or "application"
