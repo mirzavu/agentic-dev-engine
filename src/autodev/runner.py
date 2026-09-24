@@ -397,6 +397,17 @@ def grant_sandbox_access(app: Path) -> None:
                     target.chmod(stat.S_IMODE(target.stat().st_mode) | 0o111)
 
 
+def promote_plan(app: Path) -> str:
+    candidate = app / ".agents_tmp" / "PLAN.md"
+    if not candidate.is_file() or not candidate.read_text().strip():
+        raise RunFailure("OpenHands planning did not produce a plan")
+    content = candidate.read_text()
+    replacement = app / ".TASK.md.tmp"
+    replacement.write_text(content)
+    os.replace(replacement, app / "TASK.md")
+    return content
+
+
 def secrets_to_redact(driver: AgentDriver) -> list[str]:
     getter = getattr(driver, "secrets_to_redact", None)
     return getter() if callable(getter) else []
