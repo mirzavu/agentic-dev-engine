@@ -408,6 +408,18 @@ def promote_plan(app: Path) -> str:
     return content
 
 
+def planning_session(app: Path, requirement: str, driver: AgentDriver, deadline: float) -> str:
+    grant_sandbox_access(app)
+    with openhands_auth_volumes(driver) as auth_volumes:
+        workspace = LoopbackDockerWorkspace.create(app, extra_volumes=auth_volumes)
+        try:
+            with workspace:
+                driver.plan(workspace, requirement, agent_turn_timeout(driver, deadline))
+        finally:
+            normalize_permissions(app)
+    return promote_plan(app)
+
+
 def secrets_to_redact(driver: AgentDriver) -> list[str]:
     getter = getattr(driver, "secrets_to_redact", None)
     return getter() if callable(getter) else []
