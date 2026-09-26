@@ -21,6 +21,15 @@ from urllib.request import urlopen
 from .config import Settings
 from .workspace import LoopbackDockerWorkspace, available_loopback_port, normalize_permissions
 
+SAMPLE_REQUIREMENT = (
+    "Build a self contained task management web application with a browser UI. "
+    "Users must be able to create, edit, complete, and delete tasks. Include "
+    "automated tests and a documented command for running them. Avoid external services. "
+    "Treat the browser experience as a finished consumer product: establish a deliberate "
+    "visual direction, make the task flow feel natural, and design responsive layouts rather "
+    "than applying a generic card-and-buttons template."
+)
+
 
 class RunFailure(RuntimeError):
     pass
@@ -39,6 +48,12 @@ GIT_RUNTIME_EXCLUDES = (
 CONTAINER_OPENHANDS_STATE_DIR = "/home/openhands/.openhands"
 CONTAINER_OPENHANDS_UID = 10001
 CONTAINER_OPENHANDS_GID = 10001
+OPENHANDS_DEVELOPMENT_TOOL_GUIDANCE = (
+    "Tool-use constraint: when using the terminal tool, execute one command per action. "
+    "Do not create multiple files by pasting a large multi-heredoc shell script or a batch of "
+    "`cat > file` commands. Use the file editor for file contents, or create/edit files one at "
+    "a time, then run install, test, and build commands as separate terminal actions."
+)
 
 
 @dataclass(frozen=True)
@@ -418,6 +433,32 @@ def planning_session(app: Path, requirement: str, driver: AgentDriver, deadline:
         finally:
             normalize_permissions(app)
     return promote_plan(app)
+
+
+def implementation_prompt() -> str:
+    return f"""Implement the application described in TASK.md in /workspace. 
+IMPORTANT: Pay extraordinary attention to the UI/UX design. Treat the interface design as a premium custom product—avoid generic cards-and-buttons templates. Craft custom styling, deliberate color palettes, spacing, smooth micro-interactions, responsive structures, and strong product character. 
+{OPENHANDS_DEVELOPMENT_TOOL_GUIDANCE}
+You may install dependencies and run checks. Create automated tests and README.md documenting their exact command. Create .autodev/verification.json with token arrays named install and test, plus build when the chosen stack has a build step. Do not claim success until those commands have been run."""
+
+
+def repair_prompt(failure: CheckResult) -> str:
+    return """Mechanical verification failed. Diagnose and fix the application in /workspace, then rerun relevant checks. Do not change TASK.md to weaken requirements.
+{tool_guidance}
+The real failure was:
+
+Stage: {stage}
+Command: {command}
+Exit code: {code}
+Output:
+{output}
+""".format(
+        tool_guidance=OPENHANDS_DEVELOPMENT_TOOL_GUIDANCE,
+        stage=failure.command.name,
+        command=shlex.join(failure.command.argv),
+        code=failure.exit_code,
+        output=failure.output,
+    )
 
 
 def secrets_to_redact(driver: AgentDriver) -> list[str]:
