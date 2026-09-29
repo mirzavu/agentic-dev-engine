@@ -33,6 +33,17 @@ SAMPLE_REQUIREMENT = (
 
 class RunFailure(RuntimeError):
     pass
+
+
+VISUAL_DIMENSIONS = (
+    "visual_hierarchy",
+    "composition_density",
+    "design_coherence",
+    "task_flow_ux",
+    "responsive_design",
+    "product_character",
+)
+MIN_VISUAL_DIMENSION_SCORE = 7.0
 GIT_RUNTIME_EXCLUDES = (
     ".agents_tmp/",
     "conversations/",
@@ -71,6 +82,44 @@ class CheckResult:
     @property
     def passed(self) -> bool:
         return self.exit_code == 0
+
+
+@dataclass(frozen=True)
+class VisualIssue:
+    severity: str
+    viewport: str
+    area: str
+    evidence: str
+    recommendation: str
+
+
+@dataclass(frozen=True)
+class VisualReview:
+    score: float
+    issues: tuple[VisualIssue, ...]
+    dimensions: tuple[tuple[str, float], ...] = field(
+        default_factory=lambda: tuple((name, 10.0) for name in VISUAL_DIMENSIONS)
+    )
+    production_ready: bool = True
+
+    @property
+    def approved(self) -> bool:
+        return (
+            self.production_ready
+            and not any(issue.severity in {"high", "medium"} for issue in self.issues)
+            and all(score >= MIN_VISUAL_DIMENSION_SCORE for _, score in self.dimensions)
+        )
+
+    @property
+    def dimension_summary(self) -> str:
+        return ", ".join(f"{name.replace('_', ' ')}: {score:g}/10" for name, score in self.dimensions)
+
+
+@dataclass(frozen=True)
+class VisualArtifact:
+    name: str
+    path: Path
+    viewport: str
 
 
 def redact(text: str, secrets: list[str]) -> str:

@@ -6,7 +6,7 @@ import pytest
 
 from autodev.config import Settings
 
-from autodev.runner import (CheckResult, RunFailure, VerificationCommand, development_session, git_checkpoint, implementation_prompt, load_verification_manifest, redact, repair_prompt, safe_workspace)
+from autodev.runner import (CheckResult, RunFailure, VerificationCommand, VisualArtifact, VisualIssue, VisualReview, development_session, git_checkpoint, implementation_prompt, load_verification_manifest, redact, repair_prompt, safe_workspace)
 from autodev.workspace import workspace_mount
 
 
