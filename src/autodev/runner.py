@@ -56,6 +56,7 @@ GIT_RUNTIME_EXCLUDES = (
     "playwright-report/",
     "test-results/",
 )
+VISUAL_ARTIFACTS_DIR = ".autodev/visual"
 CONTAINER_OPENHANDS_STATE_DIR = "/home/openhands/.openhands"
 CONTAINER_OPENHANDS_UID = 10001
 CONTAINER_OPENHANDS_GID = 10001
@@ -167,6 +168,89 @@ def verify_in_workspace(workspace, app: Path, commands: list[VerificationCommand
         if not check.passed:
             break
     return results
+
+
+def chrome_executable() -> str:
+    for candidate in ("google-chrome", "chromium", "chromium-browser"):
+        path = shutil.which(candidate)
+        if path:
+            return path
+    raise RunFailure("Chrome or Chromium is required for mechanical visual screenshot capture")
+
+
+def _wait_for_http(url: str, deadline: float) -> None:
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            with urlopen(url, timeout=2) as response:
+                if response.status < 500:
+                    return
+        except (OSError, URLError) as exc:
+            last_error = exc
+        time.sleep(0.25)
+    raise RunFailure(f"Timed out waiting for visual preview server: {last_error}")
+
+
+def capture_layout_metrics(app: Path, base_url: str, browser: str, artifacts_dir: Path, deadline: float) -> Path:
+    output = artifacts_dir / "layout.json"
+    if not (app / "node_modules" / "playwright").is_dir() or not shutil.which("node"):
+        output.write_text(json.dumps({"available": False, "reason": "playwright package not available"}, indent=2))
+        return output
+    script = r"""
+const { chromium } = require('playwright');
+const browserPath = process.argv[2];
+const url = process.argv[3];
+const selectors = ['html','body','main','.intro','.capture','.capture-row','.capture input','.capture-row > button','.list-heading','.workspace'];
+(async () => {
+  const browser = await chromium.launch({headless: true, executablePath: browserPath, args: ['--no-sandbox']});
+  const results = {};
+  for (const [name, width, height] of [['desktop', 1440, 1000], ['mobile', 390, 844]]) {
+    const page = await browser.newPage({viewport: {width, height}});
+    await page.goto(url, {waitUntil: 'networkidle'});
+    results[name] = await page.evaluate((selectors) => {
+      const rects = {};
+      for (const selector of selectors) {
+        const element = selector === 'html' ? document.documentElement : selector === 'body' ? document.body : document.querySelector(selector);
+        if (!element) { rects[selector] = null; continue; }
+        const rect = element.getBoundingClientRect();
+        rects[selector] = {left: rect.left, right: rect.right, width: rect.width};
+      }
+      return {
+        innerWidth,
+        documentClientWidth: document.documentElement.clientWidth,
+        documentScrollWidth: document.documentElement.scrollWidth,
+        bodyScrollWidth: document.body.scrollWidth,
+        horizontalOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+        rects
+      };
+    }, selectors);
+    await page.close();
+  }
+  await browser.close();
+  console.log(JSON.stringify({available: true, viewports: results}));
+})().catch(async (error) => {
+  console.error(error && error.stack ? error.stack : String(error));
+  process.exit(1);
+});
+"""
+    result = subprocess.run(
+        ["node", "-", browser, base_url],
+        input=script,
+        text=True,
+        capture_output=True,
+        cwd=app,
+        timeout=max(1, deadline - time.monotonic()),
+        check=False,
+    )
+    if result.returncode:
+        output.write_text(json.dumps({"available": False, "reason": (result.stderr or result.stdout).strip()[:1000]}, indent=2))
+        return output
+    try:
+        metrics = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        metrics = {"available": False, "reason": "layout metrics command did not return JSON"}
+    output.write_text(json.dumps(metrics, indent=2))
+    return output
 
 
 class AgentDriver(Protocol):
