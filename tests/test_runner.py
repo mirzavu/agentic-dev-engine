@@ -6,7 +6,7 @@ import pytest
 
 from autodev.config import Settings
 
-from autodev.runner import (CheckResult, RunFailure, VerificationCommand, VisualArtifact, VisualIssue, VisualReview, development_session, git_checkpoint, implementation_prompt, load_verification_manifest, redact, repair_prompt, safe_workspace)
+from autodev.runner import (CheckResult, RunFailure, VerificationCommand, VisualArtifact, VisualIssue, VisualReview, capture_visual_artifacts, development_session, git_checkpoint, implementation_prompt, load_verification_manifest, redact, repair_prompt, safe_workspace)
 from autodev.workspace import workspace_mount
 
 
@@ -34,6 +34,52 @@ def test_manifest_rejects_missing_install(tmp_path):
     (tmp_path / "README.md").write_text("pytest")
     with pytest.raises(RunFailure):
         load_verification_manifest(tmp_path)
+
+
+def test_visual_artifact_capture_is_host_side_and_bounded(monkeypatch, tmp_path):
+    (tmp_path / "dist").mkdir()
+    server_state = {"terminated": False}
+
+    class FakeServer:
+        stdout = None
+        stderr = None
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            server_state["terminated"] = True
+
+        def wait(self, timeout):
+            return 0
+
+    def fake_run(argv, **kwargs):
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        screenshot = next((item.removeprefix("--screenshot=") for item in argv if item.startswith("--screenshot=")), None)
+        assert screenshot is not None
+        Path(screenshot).write_bytes(b"png")
+        assert "--headless=new" in argv
+        assert "--no-sandbox" in argv
+        return Result()
+
+    monkeypatch.setattr("autodev.runner.chrome_executable", lambda: "/usr/bin/google-chrome")
+    monkeypatch.setattr("autodev.runner.available_loopback_port", lambda: 45678)
+    monkeypatch.setattr("autodev.runner._wait_for_http", lambda url, deadline: None)
+    monkeypatch.setattr("autodev.runner.subprocess.Popen", lambda *args, **kwargs: FakeServer())
+    monkeypatch.setattr("autodev.runner.subprocess.run", fake_run)
+
+    artifacts = capture_visual_artifacts(tmp_path)
+
+    assert [artifact.name for artifact in artifacts] == ["desktop", "mobile"]
+    assert (tmp_path / ".autodev" / "visual" / "desktop.png").is_file()
+    assert (tmp_path / ".autodev" / "visual" / "mobile.png").is_file()
+    manifest = json.loads((tmp_path / ".autodev" / "visual" / "manifest.json").read_text())
+    assert manifest["url"] == "http://127.0.0.1:45678/"
+    assert server_state["terminated"]
 
 
 def test_existing_workspace_is_never_reset(tmp_path):

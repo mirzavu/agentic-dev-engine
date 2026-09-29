@@ -191,6 +191,74 @@ def _wait_for_http(url: str, deadline: float) -> None:
     raise RunFailure(f"Timed out waiting for visual preview server: {last_error}")
 
 
+def capture_visual_artifacts(app: Path, *, timeout: float = 60.0) -> tuple[VisualArtifact, ...]:
+    dist = app / "dist"
+    if not dist.is_dir():
+        raise RunFailure("Visual QA requires a built dist directory from mechanical verification")
+    artifacts_dir = app / VISUAL_ARTIFACTS_DIR
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    browser = chrome_executable()
+    port = available_loopback_port()
+    deadline = time.monotonic() + timeout
+    server = subprocess.Popen(
+        [sys.executable, "-m", "http.server", str(port), "--bind", "127.0.0.1", "--directory", str(dist)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        if server.poll() is not None:
+            _, stderr = server.communicate(timeout=1)
+            raise RunFailure(f"Visual preview server exited early: {stderr.strip()}")
+        base_url = f"http://127.0.0.1:{port}/"
+        _wait_for_http(base_url, deadline)
+        captures = (
+            ("desktop", "1440,1000", artifacts_dir / "desktop.png"),
+            ("mobile", "390,844", artifacts_dir / "mobile.png"),
+        )
+        artifacts: list[VisualArtifact] = []
+        for name, viewport, output in captures:
+            result = subprocess.run(
+                [
+                    browser,
+                    "--headless=new",
+                    "--disable-gpu",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    f"--window-size={viewport}",
+                    f"--screenshot={output}",
+                    base_url,
+                ],
+                text=True,
+                capture_output=True,
+                timeout=max(1, deadline - time.monotonic()),
+                check=False,
+            )
+            if result.returncode or not output.is_file() or output.stat().st_size == 0:
+                message = (result.stderr or result.stdout or "no output").strip()
+                raise RunFailure(f"Failed to capture {name} screenshot: {message}")
+            artifacts.append(VisualArtifact(name, output, viewport))
+        layout_metrics = capture_layout_metrics(app, base_url, browser, artifacts_dir, deadline)
+        manifest = {
+            "url": base_url,
+            "layout_metrics": f"/workspace/{layout_metrics.relative_to(app)}",
+            "artifacts": [
+                {"name": item.name, "path": f"/workspace/{item.path.relative_to(app)}", "viewport": item.viewport}
+                for item in artifacts
+            ],
+        }
+        (artifacts_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+        return tuple(artifacts)
+    finally:
+        if server.poll() is None:
+            server.terminate()
+            try:
+                server.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                server.kill()
+                server.wait(timeout=5)
+
+
 def capture_layout_metrics(app: Path, base_url: str, browser: str, artifacts_dir: Path, deadline: float) -> Path:
     output = artifacts_dir / "layout.json"
     if not (app / "node_modules" / "playwright").is_dir() or not shutil.which("node"):
