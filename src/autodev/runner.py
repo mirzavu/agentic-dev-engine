@@ -435,6 +435,27 @@ def planning_session(app: Path, requirement: str, driver: AgentDriver, deadline:
     return promote_plan(app)
 
 
+def development_session(app: Path, prompt: str, driver: AgentDriver, deadline: float) -> list[CheckResult]:
+    grant_sandbox_access(app)
+    with openhands_auth_volumes(driver) as auth_volumes:
+        workspace = LoopbackDockerWorkspace.create(app, extra_volumes=auth_volumes)
+        try:
+            with workspace:
+                workspace.execute_command('git config --global --add safe.directory /workspace')
+                driver.develop(workspace, prompt, agent_turn_timeout(driver, deadline))
+        finally:
+            normalize_permissions(app)
+    commands = load_verification_manifest(app)
+    grant_sandbox_access(app)
+    verifier = LoopbackDockerWorkspace.create(app)
+    try:
+        with verifier:
+            timeout = getattr(getattr(driver, 'settings', None), 'command_timeout_seconds', 600)
+            return verify_in_workspace(verifier, app, commands, command_timeout=timeout)
+    finally:
+        normalize_permissions(app)
+
+
 def implementation_prompt() -> str:
     return f"""Implement the application described in TASK.md in /workspace. 
 IMPORTANT: Pay extraordinary attention to the UI/UX design. Treat the interface design as a premium custom product—avoid generic cards-and-buttons templates. Craft custom styling, deliberate color palettes, spacing, smooth micro-interactions, responsive structures, and strong product character. 
