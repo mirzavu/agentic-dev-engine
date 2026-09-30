@@ -6,7 +6,7 @@ import pytest
 
 from autodev.config import Settings
 
-from autodev.runner import (CheckResult, RunFailure, VerificationCommand, VisualArtifact, VisualIssue, VisualReview, capture_visual_artifacts, development_session, git_checkpoint, implementation_prompt, load_verification_manifest, redact, repair_prompt, safe_workspace)
+from autodev.runner import (CheckResult, RunFailure, VerificationCommand, VisualArtifact, VisualIssue, VisualReview, capture_visual_artifacts, development_session, git_checkpoint, implementation_prompt, load_verification_manifest, load_visual_review, redact, repair_prompt, safe_workspace)
 from autodev.workspace import workspace_mount
 
 
@@ -34,6 +34,17 @@ def test_manifest_rejects_missing_install(tmp_path):
     (tmp_path / "README.md").write_text("pytest")
     with pytest.raises(RunFailure):
         load_verification_manifest(tmp_path)
+
+
+def test_visual_review_accepts_fractional_score(tmp_path):
+    (tmp_path / ".autodev").mkdir()
+    (tmp_path / ".autodev" / "visual-review.json").write_text(json.dumps({
+        "score": 7.5,
+        "dimensions": {name: 7.5 for name in ("visual_hierarchy", "composition_density", "design_coherence", "task_flow_ux", "responsive_design", "product_character")},
+        "production_ready": False,
+        "issues": [],
+    }))
+    assert load_visual_review(tmp_path).score == 7.5
 
 
 def test_visual_artifact_capture_is_host_side_and_bounded(monkeypatch, tmp_path):
