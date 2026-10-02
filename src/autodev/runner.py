@@ -57,6 +57,7 @@ GIT_RUNTIME_EXCLUDES = (
     "test-results/",
 )
 VISUAL_ARTIFACTS_DIR = ".autodev/visual"
+VISUAL_REVIEW_HISTORY = ".autodev/visual-review-history.json"
 CONTAINER_OPENHANDS_STATE_DIR = "/home/openhands/.openhands"
 CONTAINER_OPENHANDS_UID = 10001
 CONTAINER_OPENHANDS_GID = 10001
@@ -388,6 +389,79 @@ def load_visual_review(app: Path) -> VisualReview:
         tuple((name, float(dimensions[name])) for name in VISUAL_DIMENSIONS),
         production_ready,
     )
+
+
+def visual_issue_to_dict(issue: VisualIssue) -> dict[str, str]:
+    return {
+        "severity": issue.severity,
+        "viewport": issue.viewport,
+        "area": issue.area,
+        "evidence": issue.evidence,
+        "recommendation": issue.recommendation,
+    }
+
+
+def visual_review_to_dict(review: VisualReview) -> dict:
+    return {
+        "score": review.score,
+        "dimensions": {name: score for name, score in review.dimensions},
+        "production_ready": review.production_ready,
+        "issues": [visual_issue_to_dict(issue) for issue in review.issues],
+    }
+
+
+def load_visual_review_history(app: Path) -> list[dict]:
+    path = app / VISUAL_REVIEW_HISTORY
+    if not path.is_file():
+        return []
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return []
+    rounds = data.get("rounds") if isinstance(data, dict) else None
+    if not isinstance(rounds, list):
+        return []
+    return [item for item in rounds if isinstance(item, dict)][-5:]
+
+
+def append_visual_review_history(app: Path, review: VisualReview) -> None:
+    history = load_visual_review_history(app)
+    history.append(visual_review_to_dict(review))
+    path = app / VISUAL_REVIEW_HISTORY
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"rounds": history[-5:]}, indent=2))
+
+
+def clear_visual_review_history(app: Path) -> None:
+    (app / VISUAL_REVIEW_HISTORY).unlink(missing_ok=True)
+
+
+def visual_review_history_prompt(history: list[dict]) -> str:
+    if not history:
+        return "Previous visual QA rounds: none."
+    lines = ["Previous visual QA rounds from this run:"]
+    for index, review in enumerate(history, start=1):
+        score = review.get("score", "unknown")
+        dimensions = review.get("dimensions", {})
+        if isinstance(dimensions, dict):
+            dimension_text = ", ".join(f"{name}: {value}/10" for name, value in dimensions.items())
+        else:
+            dimension_text = "unavailable"
+        lines.append(f"Round {index}: score {score}/10; dimensions: {dimension_text}")
+        issues = review.get("issues", [])
+        if not isinstance(issues, list) or not issues:
+            lines.append("- No recorded issues.")
+            continue
+        for issue in issues:
+            if not isinstance(issue, dict):
+                continue
+            severity = issue.get("severity", "unknown")
+            viewport = issue.get("viewport", "unknown viewport")
+            area = issue.get("area", "unknown area")
+            evidence = issue.get("evidence", "")
+            recommendation = issue.get("recommendation", "")
+            lines.append(f"- [{severity}] {viewport}, {area}: {evidence} Required correction: {recommendation}")
+    return "\n".join(lines)
 
 
 class AgentDriver(Protocol):
@@ -741,7 +815,9 @@ def visual_review_session(app: Path, driver: AgentDriver, deadline: float) -> Vi
                 driver.review_visual(workspace, visual_review_prompt(artifacts, app), timeout)
         finally:
             normalize_permissions(app)
-    return load_visual_review(app)
+    review = load_visual_review(app)
+    append_visual_review_history(app, review)
+    return review
 
 
 def implementation_prompt() -> str:
@@ -771,66 +847,69 @@ Output:
 
 
 def visual_review_prompt(artifacts: tuple[VisualArtifact, ...], app: Path) -> str:
-    sections = []
-    sections.append("Act as a senior product-design reviewer, not an implementer.")
-    sections.append("Do not modify application source code or inspect unrelated files.")
-    sections.append("Review these pre-captured screenshots:")
-    sections.append(_visual_artifact_rows(artifacts, app))
-    sections.append(_visual_review_instructions())
-    sections.append("Write .autodev/visual-review.json using this schema:")
-    sections.append(json.dumps(visual_review_schema(), indent=2))
-    return "\n\n".join(sections)
+    screenshots = "\n".join(
+        f"- {artifact.name}: /workspace/{artifact.path.relative_to(app)} ({artifact.viewport})"
+        for artifact in artifacts
+    )
+    return (
+        "Act as a senior product-design reviewer, not an implementer. Do not modify application source code or inspect unrelated repository files. Work quickly from these pre-captured screenshots:\n"
+        f"{screenshots}\n"
+        f"{visual_review_history_prompt(load_visual_review_history(app))}\n"
+        """
+Also inspect /workspace/.autodev/visual/layout.json when it exists. It contains mechanical viewport widths, document scroll widths, and bounding boxes for key layout elements. Use it to distinguish real clipping/overflow from screenshot interpretation. Do not report horizontal overflow or edge clipping when the metrics show horizontalOverflow false and the relevant element right edge is comfortably inside documentClientWidth. You may still report weak spacing or composition when the layout is mechanically contained.
+
+Use browser screenshots as the primary evidence. Assess the actual page in context, not generic named controls. Judge it as a finished consumer product, not as a CSS bug sweep. A technically aligned generic template is not production-ready merely because it has no broken controls.
+
+When prior visual QA rounds are listed, first check whether those specific issues were corrected in the current screenshots. Keep unresolved prior issues in the new issues list with current evidence, drop resolved issues, and add any new concrete issues that would improve the score.
+
+Do not start a browser or server; the orchestrator already captured the visual artifacts mechanically. If you cannot inspect the screenshot pixels with your available capabilities, write the JSON with score 0, production_ready false, and one high-severity issue stating that visual artifacts could not be inspected. Do not mark success from source code alone.
+
+Score each of these from 0-10: visual hierarchy; composition and density; design coherence; task-flow UX; responsive design; product character. Product character asks whether the page feels deliberately designed for this application rather than a default card-and-buttons template. Assess the actual interface in context; do not invent universal page-specific rules.
+
+Mark production_ready true only when this looks like a credible, intentional finished product. It must be false if any dimension is below 7, if there is a high/medium issue, or if the design is merely generic despite being technically tidy. Recommend a visual redesign when the underlying composition, density, hierarchy, or character is weak; do not limit feedback to micro-polish.
+
+Write /workspace/.autodev/visual-review.json with exactly this shape:
+{
+  "score": 0,
+  "dimensions": {
+    "visual_hierarchy": 0,
+    "composition_density": 0,
+    "design_coherence": 0,
+    "task_flow_ux": 0,
+    "responsive_design": 0,
+    "product_character": 0
+  },
+  "production_ready": false,
+  "issues": [
+    {"severity":"high|medium|low", "viewport":"desktop|mobile", "area":"short location", "evidence":"what is visibly wrong", "recommendation":"intent-level correction"}
+  ]
+}
+
+Use a 0-10 score. Record only concrete visual findings. An empty issues list is allowed only when there are no high or medium issues. Finish after writing the file."""
+    )
 
 
 def visual_fix_prompt(review: VisualReview) -> str:
-    lines = [
-        "A senior product-design reviewer inspected the application.",
-        "Address the underlying design feedback while preserving working behavior.",
-        "Do not weaken required features or tests; preserve the verification manifest.",
-        "Rerun relevant checks after changing the implementation.",
-        OPENHANDS_DEVELOPMENT_TOOL_GUIDANCE,
-        f"Overall score: {review.score}/10",
-        f"Dimension scores: {review.dimension_summary}",
-        f"Production-ready: {review.production_ready}",
-        "Findings:",
-    ]
-    for issue in review.issues:
-        location = f"{issue.viewport}, {issue.area}"
-        finding = f"- [{issue.severity}] {location}: {issue.evidence}"
-        correction = f"Intent: {issue.recommendation}"
-        lines.append(f"{finding}. {correction}")
-    if not review.issues:
-        lines.append("- Improve visual quality while preserving working behavior.")
-    return "\n".join(lines)
+    findings = "\n".join(
+        f"- [{issue.severity}] {issue.viewport}, {issue.area}: {issue.evidence}. Intent: {issue.recommendation}"
+        for issue in review.issues
+    ) or "- Improve the visual quality score while preserving working behavior."
+    return """A senior product-design reviewer inspected the current application. Improve the implementation to address the underlying design feedback, not only individual component styling. Do not weaken required features or tests. Preserve the verification manifest and rerun relevant checks.
+{tool_guidance}
+
+Overall score: {score}/10
+Dimension scores: {dimensions}
+Production-ready: {production_ready}
+Findings:
+{findings}""".format(
+        tool_guidance=OPENHANDS_DEVELOPMENT_TOOL_GUIDANCE,
+        score=review.score,
+        dimensions=review.dimension_summary,
+        production_ready=review.production_ready,
+        findings=findings,
+    )
 
 
 def secrets_to_redact(driver: AgentDriver) -> list[str]:
     getter = getattr(driver, "secrets_to_redact", None)
     return getter() if callable(getter) else []
-
-
-def _visual_artifact_rows(artifacts: tuple[VisualArtifact, ...], app: Path) -> str:
-    rows = []
-    for artifact in artifacts:
-        relative = artifact.path.relative_to(app)
-        path = f"/workspace/{relative}"
-        description = f"- {artifact.name}: {path} ({artifact.viewport})"
-        rows.append(description)
-    return "\n".join(rows)
-
-
-def _visual_review_instructions() -> str:
-    instructions = [
-        "Do not start a browser or server; evidence has already been captured.",
-        "Use screenshot pixels as the primary evidence, rather than source code.",
-        "When pixels cannot be inspected, use score 0 and production_ready false.",
-        "Assess hierarchy, composition, coherence, task flow, responsiveness, and character.",
-        "Use the captured desktop and mobile viewports to assess the application.",
-        "Record concrete findings with severity, viewport, area, evidence, and recommendation.",
-        "An intentional product design is required; aligned generic controls are insufficient.",
-        "Inspect .autodev/visual/layout.json for mechanical clipping evidence when available.",
-        "Do not report horizontal overflow when layout metrics show the viewport contains it.",
-        "Set production_ready false for any dimension below seven or medium/high issue.",
-        "Finish after writing the structured visual review response.",
-    ]
-    return "\n".join(instructions)
