@@ -726,6 +726,24 @@ def development_session(app: Path, prompt: str, driver: AgentDriver, deadline: f
         normalize_permissions(app)
 
 
+def visual_review_session(app: Path, driver: AgentDriver, deadline: float) -> VisualReview:
+    review_path = app / ".autodev" / "visual-review.json"
+    review_path.unlink(missing_ok=True)
+    remaining = max(1, deadline - time.monotonic())
+    limit = getattr(getattr(driver, "settings", None), "visual_review_seconds", 180)
+    timeout = min(remaining, limit)
+    artifacts = capture_visual_artifacts(app, timeout=min(timeout, 60))
+    grant_sandbox_access(app)
+    with openhands_auth_volumes(driver) as auth_volumes:
+        workspace = LoopbackDockerWorkspace.create(app, extra_volumes=auth_volumes)
+        try:
+            with workspace:
+                driver.review_visual(workspace, visual_review_prompt(artifacts, app), timeout)
+        finally:
+            normalize_permissions(app)
+    return load_visual_review(app)
+
+
 def implementation_prompt() -> str:
     return f"""Implement the application described in TASK.md in /workspace. 
 IMPORTANT: Pay extraordinary attention to the UI/UX design. Treat the interface design as a premium custom product—avoid generic cards-and-buttons templates. Craft custom styling, deliberate color palettes, spacing, smooth micro-interactions, responsive structures, and strong product character. 
@@ -752,6 +770,67 @@ Output:
     )
 
 
+def visual_review_prompt(artifacts: tuple[VisualArtifact, ...], app: Path) -> str:
+    sections = []
+    sections.append("Act as a senior product-design reviewer, not an implementer.")
+    sections.append("Do not modify application source code or inspect unrelated files.")
+    sections.append("Review these pre-captured screenshots:")
+    sections.append(_visual_artifact_rows(artifacts, app))
+    sections.append(_visual_review_instructions())
+    sections.append("Write .autodev/visual-review.json using this schema:")
+    sections.append(json.dumps(visual_review_schema(), indent=2))
+    return "\n\n".join(sections)
+
+
+def visual_fix_prompt(review: VisualReview) -> str:
+    lines = [
+        "A senior product-design reviewer inspected the application.",
+        "Address the underlying design feedback while preserving working behavior.",
+        "Do not weaken required features or tests; preserve the verification manifest.",
+        "Rerun relevant checks after changing the implementation.",
+        OPENHANDS_DEVELOPMENT_TOOL_GUIDANCE,
+        f"Overall score: {review.score}/10",
+        f"Dimension scores: {review.dimension_summary}",
+        f"Production-ready: {review.production_ready}",
+        "Findings:",
+    ]
+    for issue in review.issues:
+        location = f"{issue.viewport}, {issue.area}"
+        finding = f"- [{issue.severity}] {location}: {issue.evidence}"
+        correction = f"Intent: {issue.recommendation}"
+        lines.append(f"{finding}. {correction}")
+    if not review.issues:
+        lines.append("- Improve visual quality while preserving working behavior.")
+    return "\n".join(lines)
+
+
 def secrets_to_redact(driver: AgentDriver) -> list[str]:
     getter = getattr(driver, "secrets_to_redact", None)
     return getter() if callable(getter) else []
+
+
+def _visual_artifact_rows(artifacts: tuple[VisualArtifact, ...], app: Path) -> str:
+    rows = []
+    for artifact in artifacts:
+        relative = artifact.path.relative_to(app)
+        path = f"/workspace/{relative}"
+        description = f"- {artifact.name}: {path} ({artifact.viewport})"
+        rows.append(description)
+    return "\n".join(rows)
+
+
+def _visual_review_instructions() -> str:
+    instructions = [
+        "Do not start a browser or server; evidence has already been captured.",
+        "Use screenshot pixels as the primary evidence, rather than source code.",
+        "When pixels cannot be inspected, use score 0 and production_ready false.",
+        "Assess hierarchy, composition, coherence, task flow, responsiveness, and character.",
+        "Use the captured desktop and mobile viewports to assess the application.",
+        "Record concrete findings with severity, viewport, area, evidence, and recommendation.",
+        "An intentional product design is required; aligned generic controls are insufficient.",
+        "Inspect .autodev/visual/layout.json for mechanical clipping evidence when available.",
+        "Do not report horizontal overflow when layout metrics show the viewport contains it.",
+        "Set production_ready false for any dimension below seven or medium/high issue.",
+        "Finish after writing the structured visual review response.",
+    ]
+    return "\n".join(instructions)

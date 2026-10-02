@@ -6,7 +6,7 @@ import pytest
 
 from autodev.config import Settings
 
-from autodev.runner import (CheckResult, RunFailure, VerificationCommand, VisualArtifact, VisualIssue, VisualReview, capture_visual_artifacts, development_session, git_checkpoint, implementation_prompt, load_verification_manifest, load_visual_review, redact, repair_prompt, safe_workspace)
+from autodev.runner import (CheckResult, RunFailure, VerificationCommand, VisualArtifact, VisualIssue, VisualReview, capture_visual_artifacts, development_session, git_checkpoint, implementation_prompt, load_verification_manifest, load_visual_review, redact, repair_prompt, safe_workspace, visual_fix_prompt, visual_review_prompt, visual_review_session)
 from autodev.workspace import workspace_mount
 
 
@@ -91,6 +91,16 @@ def test_visual_artifact_capture_is_host_side_and_bounded(monkeypatch, tmp_path)
     manifest = json.loads((tmp_path / ".autodev" / "visual" / "manifest.json").read_text())
     assert manifest["url"] == "http://127.0.0.1:45678/"
     assert server_state["terminated"]
+
+
+def test_development_prompts_forbid_multi_heredoc_file_batches():
+    guidance = "Do not create multiple files by pasting a large multi-heredoc shell script"
+
+    assert guidance in implementation_prompt()
+    assert guidance in repair_prompt(command("test", 1))
+    assert guidance in visual_fix_prompt(
+        VisualReview(7, (VisualIssue("medium", "desktop", "controls", "Crowded", "Improve spacing"),))
+    )
 
 
 def test_existing_workspace_is_never_reset(tmp_path):
