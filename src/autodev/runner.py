@@ -322,22 +322,72 @@ const selectors = ['html','body','main','.intro','.capture','.capture-row','.cap
 
 
 def visual_review_schema() -> dict:
+    issue_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["severity", "viewport", "area", "evidence", "recommendation"],
+        "properties": {
+            "severity": {"type": "string", "enum": ["high", "medium", "low"]},
+            "viewport": {"type": "string"},
+            "area": {"type": "string"},
+            "evidence": {"type": "string"},
+            "recommendation": {"type": "string"},
+        },
+    }
     return {
         "type": "object",
         "additionalProperties": False,
-        "required": ["score", "issues"],
+        "required": ["score", "dimensions", "production_ready", "issues"],
         "properties": {
             "score": {"type": "number", "minimum": 0, "maximum": 10},
-            "issues": {"type": "array", "items": _basic_visual_issue_schema()},
+            "dimensions": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": list(VISUAL_DIMENSIONS),
+                "properties": {
+                    name: {"type": "number", "minimum": 0, "maximum": 10}
+                    for name in VISUAL_DIMENSIONS
+                },
+            },
+            "production_ready": {"type": "boolean"},
+            "issues": {"type": "array", "items": issue_schema},
         },
     }
 
 
 def load_visual_review(app: Path) -> VisualReview:
-    payload = _read_visual_review_payload(app)
-    score = _read_visual_review_score(payload)
-    issues = _read_visual_review_issues(payload)
-    return VisualReview(score, tuple(issues), production_ready=False)
+    path = app / ".autodev" / "visual-review.json"
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RunFailure("Missing or invalid .autodev/visual-review.json") from exc
+    score = data.get("score") if isinstance(data, dict) else None
+    issues = data.get("issues") if isinstance(data, dict) else None
+    dimensions = data.get("dimensions") if isinstance(data, dict) else None
+    production_ready = data.get("production_ready") if isinstance(data, dict) else None
+    if (isinstance(score, bool) or not isinstance(score, (int, float)) or not 0 <= score <= 10
+            or not isinstance(issues, list) or not isinstance(dimensions, dict)
+            or not isinstance(production_ready, bool)):
+        raise RunFailure("Visual review must contain score, dimensions, production_ready, and issues")
+    if set(dimensions) != set(VISUAL_DIMENSIONS) or any(
+        isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 10
+        for value in dimensions.values()
+    ):
+        raise RunFailure("Visual review dimensions must score every required dimension from 0-10")
+    parsed: list[VisualIssue] = []
+    for issue in issues:
+        if not isinstance(issue, dict) or issue.get("severity") not in {"high", "medium", "low"}:
+            raise RunFailure("Each visual issue must declare high, medium, or low severity")
+        fields = [issue.get(key) for key in ("viewport", "area", "evidence", "recommendation")]
+        if not all(isinstance(value, str) and value.strip() for value in fields):
+            raise RunFailure("Each visual issue must include viewport, area, evidence, and recommendation")
+        parsed.append(VisualIssue(issue["severity"], *fields))
+    return VisualReview(
+        float(score),
+        tuple(parsed),
+        tuple((name, float(dimensions[name])) for name in VISUAL_DIMENSIONS),
+        production_ready,
+    )
 
 
 class AgentDriver(Protocol):
@@ -705,76 +755,3 @@ Output:
 def secrets_to_redact(driver: AgentDriver) -> list[str]:
     getter = getattr(driver, "secrets_to_redact", None)
     return getter() if callable(getter) else []
-
-
-def _basic_visual_issue_schema() -> dict:
-    return {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["severity", "viewport", "area", "evidence", "recommendation"],
-        "properties": {
-            "severity": {"type": "string", "enum": ["high", "medium", "low"]},
-            "viewport": {"type": "string"},
-            "area": {"type": "string"},
-            "evidence": {"type": "string"},
-            "recommendation": {"type": "string"},
-        },
-    }
-
-
-def _read_visual_review_payload(app: Path) -> dict:
-    path = app / ".autodev" / "visual-review.json"
-    try:
-        text = path.read_text()
-    except OSError as error:
-        raise RunFailure("Missing visual review response") from error
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError as error:
-        raise RunFailure("Invalid visual review JSON") from error
-    if not isinstance(payload, dict):
-        raise RunFailure("Visual review response must be an object")
-    return payload
-
-
-def _read_visual_review_score(payload: dict) -> float:
-    if "score" not in payload:
-        raise RunFailure("Visual review response is missing score")
-    value = payload["score"]
-    if isinstance(value, bool):
-        raise RunFailure("Visual review score must be numeric")
-    if not isinstance(value, (int, float)):
-        raise RunFailure("Visual review score must be numeric")
-    if not 0 <= value <= 10:
-        raise RunFailure("Visual review score must be between zero and ten")
-    return float(value)
-
-
-def _read_visual_review_issues(payload: dict) -> list[VisualIssue]:
-    if "issues" not in payload:
-        raise RunFailure("Visual review response is missing issues")
-    items = payload["issues"]
-    if not isinstance(items, list):
-        raise RunFailure("Visual review issues must be an array")
-    parsed = []
-    for item in items:
-        if not isinstance(item, dict):
-            raise RunFailure("Each visual issue must be an object")
-        severity = item.get("severity")
-        if severity not in ("high", "medium", "low"):
-            raise RunFailure("Each visual issue must declare its severity")
-        viewport = item.get("viewport")
-        area = item.get("area")
-        evidence = item.get("evidence")
-        recommendation = item.get("recommendation")
-        for value in (viewport, area, evidence, recommendation):
-            if not isinstance(value, str) or not value.strip():
-                raise RunFailure("Each visual issue must include descriptive text")
-        parsed.append(VisualIssue(
-            severity=severity,
-            viewport=viewport,
-            area=area,
-            evidence=evidence,
-            recommendation=recommendation,
-        ))
-    return parsed
