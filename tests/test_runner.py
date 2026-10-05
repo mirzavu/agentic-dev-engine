@@ -93,6 +93,25 @@ def test_visual_artifact_capture_is_host_side_and_bounded(monkeypatch, tmp_path)
     assert server_state["terminated"]
 
 
+def test_visual_review_prompt_uses_captured_artifacts(tmp_path):
+    (tmp_path / "TASK.md").write_text("Build a desktop-only app. Mobile responsiveness is not required.")
+    artifact = VisualArtifact("desktop", tmp_path / ".autodev" / "visual" / "desktop.png", "1440,1000")
+    append_visual_review_history(
+        tmp_path,
+        VisualReview(7, (VisualIssue("medium", "mobile", "task row", "Crowded controls", "Reduce action weight"),)),
+    )
+
+    prompt = visual_review_prompt((artifact,), tmp_path)
+
+    assert "/workspace/.autodev/visual/desktop.png" in prompt
+    assert "Do not start a browser or server" in prompt
+    assert "Previous visual QA rounds from this run" in prompt
+    assert "Crowded controls" in prompt
+    assert "Reduce action weight" in prompt
+    assert "Do not penalize the app for mobile layout quality" in prompt
+    assert "score 0" in prompt
+
+
 def test_development_prompts_forbid_multi_heredoc_file_batches():
     guidance = "Do not create multiple files by pasting a large multi-heredoc shell script"
 

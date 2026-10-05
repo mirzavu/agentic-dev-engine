@@ -356,6 +356,10 @@ def visual_review_schema() -> dict:
     }
 
 
+def codex_cli_visual_review_prompt() -> str:
+    return codex_cli_visual_review_prompt_for_app(Path.cwd())
+
+
 def load_visual_review(app: Path) -> VisualReview:
     path = app / ".autodev" / "visual-review.json"
     try:
@@ -462,6 +466,40 @@ def visual_review_history_prompt(history: list[dict]) -> str:
             recommendation = issue.get("recommendation", "")
             lines.append(f"- [{severity}] {viewport}, {area}: {evidence} Required correction: {recommendation}")
     return "\n".join(lines)
+
+
+def visual_scope_prompt(app: Path) -> str:
+    task = (app / "TASK.md").read_text(errors="replace").lower() if (app / "TASK.md").is_file() else ""
+    if "desktop-only" in task or "mobile responsiveness is not required" in task:
+        return (
+            "Scope note: TASK.md declares this as desktop-only and says mobile responsiveness is not required. "
+            "Do not penalize the app for mobile layout quality. Treat responsive_design as desktop viewport "
+            "fit, absence of unintended horizontal clipping at the target desktop width, and stable layout "
+            "behavior. Use any mobile screenshot only to detect severe accidental breakage, not as a quality gate."
+        )
+    return (
+        "Scope note: evaluate both desktop and mobile screenshots. Treat responsive_design as quality across "
+        "the captured viewport range."
+    )
+
+
+def codex_cli_visual_review_prompt_for_app(app: Path) -> str:
+    history = visual_review_history_prompt(load_visual_review_history(app))
+    return f"""Act as a senior product-design reviewer. Review only the attached desktop and mobile screenshots. Do not modify source files.
+
+Judge the interface as a finished consumer product, not as a CSS bug sweep. A tidy generic template is not production-ready merely because controls are aligned.
+
+{visual_scope_prompt(app)}
+
+{history}
+
+When prior visual QA rounds are listed, first check whether those specific issues were corrected in the current screenshots. Keep unresolved prior issues in the new issues list with current evidence, drop resolved issues, and add any new concrete issues that would improve the score.
+
+Score these dimensions from 0-10: visual_hierarchy, composition_density, design_coherence, task_flow_ux, responsive_design, product_character.
+
+Set production_ready true only when the UI looks intentional, credible, balanced on desktop and mobile, and has no high or medium design issues. Product character means the page feels deliberately designed for this application rather than a default card-and-buttons template.
+
+Return only valid JSON matching the requested schema. Record concrete visual findings only."""
 
 
 class AgentDriver(Protocol):
@@ -801,23 +839,29 @@ def development_session(app: Path, prompt: str, driver: AgentDriver, deadline: f
 
 
 def visual_review_session(app: Path, driver: AgentDriver, deadline: float) -> VisualReview:
-    review_path = app / ".autodev" / "visual-review.json"
+    review_path = app / '.autodev' / 'visual-review.json'
     review_path.unlink(missing_ok=True)
-    remaining = max(1, deadline - time.monotonic())
-    limit = getattr(getattr(driver, "settings", None), "visual_review_seconds", 180)
-    timeout = min(remaining, limit)
+    timeout = min(max(1, deadline - time.monotonic()), getattr(getattr(driver, 'settings', None), 'visual_review_seconds', 180))
     artifacts = capture_visual_artifacts(app, timeout=min(timeout, 60))
     grant_sandbox_access(app)
+    failure: Exception | None = None
     with openhands_auth_volumes(driver) as auth_volumes:
         workspace = LoopbackDockerWorkspace.create(app, extra_volumes=auth_volumes)
         try:
             with workspace:
                 driver.review_visual(workspace, visual_review_prompt(artifacts, app), timeout)
+        except Exception as exc:
+            failure = exc
         finally:
             normalize_permissions(app)
-    review = load_visual_review(app)
-    append_visual_review_history(app, review)
-    return review
+    try:
+        review = load_visual_review(app)
+        append_visual_review_history(app, review)
+        return review
+    except RunFailure as load_error:
+        if failure is not None:
+            raise RunFailure(f'OpenHands visual review failed: {failure}') from failure
+        raise
 
 
 def implementation_prompt() -> str:
@@ -854,6 +898,7 @@ def visual_review_prompt(artifacts: tuple[VisualArtifact, ...], app: Path) -> st
     return (
         "Act as a senior product-design reviewer, not an implementer. Do not modify application source code or inspect unrelated repository files. Work quickly from these pre-captured screenshots:\n"
         f"{screenshots}\n"
+        f"{visual_scope_prompt(app)}\n"
         f"{visual_review_history_prompt(load_visual_review_history(app))}\n"
         """
 Also inspect /workspace/.autodev/visual/layout.json when it exists. It contains mechanical viewport widths, document scroll widths, and bounding boxes for key layout elements. Use it to distinguish real clipping/overflow from screenshot interpretation. Do not report horizontal overflow or edge clipping when the metrics show horizontalOverflow false and the relevant element right edge is comfortably inside documentClientWidth. You may still report weak spacing or composition when the layout is mechanically contained.
