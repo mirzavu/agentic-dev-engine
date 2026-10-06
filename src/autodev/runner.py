@@ -806,36 +806,13 @@ def promote_plan(app: Path) -> str:
 
 
 def planning_session(app: Path, requirement: str, driver: AgentDriver, deadline: float) -> str:
-    grant_sandbox_access(app)
-    with openhands_auth_volumes(driver) as auth_volumes:
-        workspace = LoopbackDockerWorkspace.create(app, extra_volumes=auth_volumes)
-        try:
-            with workspace:
-                driver.plan(workspace, requirement, agent_turn_timeout(driver, deadline))
-        finally:
-            normalize_permissions(app)
+    _execute_agent_task(app, driver, deadline, requirement, planning=True)
     return promote_plan(app)
 
 
 def development_session(app: Path, prompt: str, driver: AgentDriver, deadline: float) -> list[CheckResult]:
-    grant_sandbox_access(app)
-    with openhands_auth_volumes(driver) as auth_volumes:
-        workspace = LoopbackDockerWorkspace.create(app, extra_volumes=auth_volumes)
-        try:
-            with workspace:
-                workspace.execute_command('git config --global --add safe.directory /workspace')
-                driver.develop(workspace, prompt, agent_turn_timeout(driver, deadline))
-        finally:
-            normalize_permissions(app)
-    commands = load_verification_manifest(app)
-    grant_sandbox_access(app)
-    verifier = LoopbackDockerWorkspace.create(app)
-    try:
-        with verifier:
-            timeout = getattr(getattr(driver, 'settings', None), 'command_timeout_seconds', 600)
-            return verify_in_workspace(verifier, app, commands, command_timeout=timeout)
-    finally:
-        normalize_permissions(app)
+    _execute_agent_task(app, driver, deadline, prompt)
+    return _verify_generated_application(app, driver)
 
 
 def visual_review_session(app: Path, driver: AgentDriver, deadline: float) -> VisualReview:
@@ -955,6 +932,100 @@ Findings:
     )
 
 
+def report_text(requirement: str, plan: str, app: Path, repairs: int, visual_rounds: int, review: VisualReview | None, results: list[CheckResult], error: str | None, secrets: list[str], checkpoints: list[str] | None = None) -> str:
+    checks = "\n".join(f"- `{shlex.join(r.command.argv)}`: {'PASS' if r.passed else 'FAIL'}" for r in results) or "- No checks ran"
+    status = "SUCCESS" if error is None and results and results[-1].passed else "FAILURE"
+    visual = "Not run" if review is None else (
+        f"Score: {review.score}/10; rounds: {visual_rounds}; production-ready: {review.production_ready}\n"
+        f"Dimensions: {review.dimension_summary}\n"
+        + "\n".join(f"- [{i.severity}] {i.viewport}, {i.area}: {i.evidence}" for i in review.issues)
+    )
+    commits = "\n".join(f"- `{checkpoint}`" for checkpoint in (checkpoints or [])) or "- No source changes were committed"
+    body = f"# Autonomous development run\n\n## Result\n\n{status}\n\nRepairs attempted: {repairs}\n\n## Git checkpoints\n\n{commits}\n\n## Visual QA\n\n{visual}\n\n## Requirement\n\n{requirement}\n\n## Generated plan\n\n{plan}\n\n## Verification\n\n{checks}\n\n## Application path\n\n`{app}`\n"
+    if error:
+        body += f"\n## Final error\n\n{error}\n"
+    return redact(body, secrets)
+
+
+def run_live(app: Path, requirement: str, settings: Settings, *, driver: AgentDriver | None = None, report_dir: Path) -> tuple[bool, Path]:
+    driver = driver or OpenHandsDriver(settings)
+    deadline = time.monotonic() + settings.wall_clock_seconds
+    plan, results, error, repairs, visual_rounds, review, checkpoints = "", [], None, 0, 0, None, []
+
+    def checkpoint(message: str) -> None:
+        commit = git_checkpoint(app, message)
+        if commit:
+            checkpoints.append(f"{commit} {message}")
+
+    def repair_until_verified(current: list[CheckResult]) -> list[CheckResult]:
+        nonlocal repairs
+        while (not current or not current[-1].passed) and repairs < settings.max_repairs:
+            if time.monotonic() >= deadline:
+                raise RunFailure("Overall wall-clock limit reached")
+            repairs += 1
+            failure = current[-1]
+            failure = CheckResult(failure.command, failure.exit_code, redact(failure.output, secrets_to_redact(driver)))
+            current = development_session(app, repair_prompt(failure), driver, deadline)
+            checkpoint(f"fix: repair verification attempt {repairs}")
+        if not current or not current[-1].passed:
+            raise RunFailure("Verification failed after the repair limit")
+        return current
+
+    try:
+        initialize_git_repository(app)
+        clear_visual_review_history(app)
+        existing_plan = app / "TASK.md"
+        plan = existing_plan.read_text() if existing_plan.is_file() else planning_session(app, requirement, driver, deadline)
+        checkpoint("docs: add implementation plan")
+        results = development_session(app, implementation_prompt(), driver, deadline)
+        checkpoint("feat: implement application")
+        results = repair_until_verified(results)
+        while True:
+            review = visual_review_session(app, driver, deadline)
+            if review.score >= settings.visual_score_threshold and review.approved:
+                break
+            if visual_rounds >= settings.visual_max_rounds:
+                raise RunFailure("Visual review retry limit reached")
+            visual_rounds += 1
+            results = repair_until_verified(development_session(app, visual_fix_prompt(review), driver, deadline))
+            checkpoint(f"style: visual QA refinement {visual_rounds}")
+    except Exception as exc:  # Report failures cleanly, including setup failures.
+        error = redact(str(exc), secrets_to_redact(driver))
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report = report_dir / f"{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}-run.md"
+    report.write_text(report_text(requirement, plan, app, repairs, visual_rounds, review, results, error, secrets_to_redact(driver), checkpoints))
+    return error is None, report
+
+
 def secrets_to_redact(driver: AgentDriver) -> list[str]:
     getter = getattr(driver, "secrets_to_redact", None)
     return getter() if callable(getter) else []
+
+
+def _execute_agent_task(app: Path, driver: AgentDriver, deadline: float, prompt: str, *, planning: bool = False) -> None:
+    grant_sandbox_access(app)
+    with openhands_auth_volumes(driver) as auth_volumes:
+        workspace = LoopbackDockerWorkspace.create(app, extra_volumes=auth_volumes)
+        try:
+            with workspace:
+                timeout = agent_turn_timeout(driver, deadline)
+                if planning:
+                    driver.plan(workspace, prompt, timeout)
+                else:
+                    workspace.execute_command("git config --global --add safe.directory /workspace")
+                    driver.develop(workspace, prompt, timeout)
+        finally:
+            normalize_permissions(app)
+
+
+def _verify_generated_application(app: Path, driver: AgentDriver) -> list[CheckResult]:
+    commands = load_verification_manifest(app)
+    grant_sandbox_access(app)
+    workspace = LoopbackDockerWorkspace.create(app)
+    try:
+        with workspace:
+            settings = getattr(driver, "settings", None)
+            timeout = getattr(settings, "command_timeout_seconds", 600)
+            return verify_in_workspace(workspace, app, commands, command_timeout=timeout)
+    finally:
+        normalize_permissions(app)

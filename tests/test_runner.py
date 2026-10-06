@@ -6,7 +6,7 @@ import pytest
 
 from autodev.config import Settings
 
-from autodev.runner import (CheckResult, RunFailure, VerificationCommand, VisualArtifact, VisualIssue, VisualReview, append_visual_review_history, capture_visual_artifacts, development_session, git_checkpoint, implementation_prompt, load_verification_manifest, load_visual_review, redact, repair_prompt, safe_workspace, visual_fix_prompt, visual_review_prompt, visual_review_session)
+from autodev.runner import (CheckResult, RunFailure, VerificationCommand, VisualArtifact, VisualIssue, VisualReview, append_visual_review_history, capture_visual_artifacts, development_session, git_checkpoint, implementation_prompt, load_verification_manifest, load_visual_review, redact, repair_prompt, report_text, run_live, safe_workspace, visual_fix_prompt, visual_review_prompt, visual_review_session)
 from autodev.workspace import workspace_mount
 
 
@@ -190,3 +190,59 @@ def test_sandbox_access_preserves_dependency_bin_execution(tmp_path):
     assert executable.stat().st_mode & 0o111 == 0o111
     assert direct_target.stat().st_mode & 0o111 == 0o111
     assert native_executable.stat().st_mode & 0o111 == 0o111
+
+
+def test_report_redacts_secrets(tmp_path):
+    report = report_text("key top-secret-value", "plan", tmp_path, 0, 0, None, [command("test", 1)],
+                         "top-secret-value", ["top-secret-value"])
+    assert "top-secret-value" not in report
+    assert "[REDACTED]" in report
+
+
+def test_retry_is_bounded_and_success_requires_all_checks(monkeypatch, tmp_path):
+    calls: list[str] = []
+    monkeypatch.setattr("autodev.runner.planning_session", lambda app, req, driver, deadline: "plan")
+    monkeypatch.setattr("autodev.runner.visual_review_session", lambda *args: VisualReview(10, ()))
+
+    outcomes = [[command("install", 1)], [command("install", 0), command("test", 0), command("build", 0)]]
+    def fake_development(app, prompt, driver, deadline):
+        calls.append(prompt)
+        return outcomes.pop(0)
+    monkeypatch.setattr("autodev.runner.development_session", fake_development)
+    success, report = run_live(tmp_path, "requirement", settings(), report_dir=tmp_path / "reports")
+    assert success
+    assert len(calls) == 2
+    assert "Mechanical verification failed" in calls[1]
+    assert "SUCCESS" in report.read_text()
+
+
+def test_retry_limit_produces_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr("autodev.runner.planning_session", lambda app, req, driver, deadline: "plan")
+    monkeypatch.setattr("autodev.runner.visual_review_session", lambda *args: VisualReview(10, ()))
+    monkeypatch.setattr("autodev.runner.development_session", lambda *args: [command("test", 1)])
+    success, report = run_live(tmp_path, "requirement", settings(), report_dir=tmp_path / "reports")
+    assert not success
+    assert "repair limit" in report.read_text()
+
+
+def test_visual_retry_is_bounded(monkeypatch, tmp_path):
+    monkeypatch.setattr("autodev.runner.planning_session", lambda *args: "plan")
+    monkeypatch.setattr("autodev.runner.development_session", lambda *args: [command("build", 0)])
+    low_review = VisualReview(7, (VisualIssue("medium", "mobile", "task row", "Crowded", "Improve spacing"),))
+    monkeypatch.setattr("autodev.runner.visual_review_session", lambda *args: low_review)
+    limited = Settings("agent", None, Path("/missing/auth.json"), 2, 3, 60, 10, 10, 30, 1, 8, False)
+    success, report = run_live(tmp_path, "requirement", limited, report_dir=tmp_path / "reports")
+    assert not success
+    assert "Visual review retry limit" in report.read_text()
+
+
+def test_visual_score_alone_is_not_sufficient_for_success(monkeypatch, tmp_path):
+    monkeypatch.setattr("autodev.runner.planning_session", lambda *args: "plan")
+    monkeypatch.setattr("autodev.runner.development_session", lambda *args: [command("build", 0)])
+    review = VisualReview(8, (VisualIssue("medium", "mobile", "task row", "Crowded", "Improve spacing"),))
+    monkeypatch.setattr("autodev.runner.visual_review_session", lambda *args: review)
+
+    success, report = run_live(tmp_path, "requirement", settings(), report_dir=tmp_path / "reports")
+
+    assert not success
+    assert "Visual review retry limit" in report.read_text()
