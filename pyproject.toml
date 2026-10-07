@@ -18,6 +18,9 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/autodev"]
 
+[project.scripts]
+autodev = "autodev.cli:main"
+
 [dependency-groups]
 dev = ["pytest>=8.0"]
 
