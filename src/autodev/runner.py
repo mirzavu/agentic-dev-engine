@@ -360,6 +360,161 @@ def codex_cli_visual_review_prompt() -> str:
     return codex_cli_visual_review_prompt_for_app(Path.cwd())
 
 
+def workspace_context_bundle(app: Path, *, max_bytes: int = 180_000) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(app), "ls-files", "--cached", "--others", "--exclude-standard"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode:
+        return ""
+    excluded_prefixes = (
+        ".git/",
+        ".agents_tmp/",
+        ".autodev/visual/",
+        "node_modules/",
+        "dist/",
+        "playwright-report/",
+        "test-results/",
+    )
+    excluded_suffixes = (
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".webp",
+        ".ico",
+        ".lock",
+    )
+    chunks: list[str] = []
+    used = 0
+    for relative in result.stdout.splitlines():
+        if (
+            not relative
+            or relative.startswith(excluded_prefixes)
+            or relative.endswith(excluded_suffixes)
+        ):
+            continue
+        path = app / relative
+        if not path.is_file():
+            continue
+        try:
+            content = path.read_text(errors="replace")
+        except OSError:
+            continue
+        chunk = f"\n--- FILE: {relative} ---\n{content}\n"
+        if used + len(chunk.encode("utf-8")) > max_bytes:
+            break
+        chunks.append(chunk)
+        used += len(chunk.encode("utf-8"))
+    return "".join(chunks)
+
+
+def codex_cli_task(app: Path, prompt: str, *, timeout: float) -> None:
+    codex = shutil.which("codex")
+    if not codex:
+        raise RunFailure("Codex CLI fallback is enabled but `codex` is not on PATH")
+    scratch = app / ".agents_tmp"
+    scratch.mkdir(parents=True, exist_ok=True)
+    last_message = scratch / "codex-last-message.txt"
+    changes_json = scratch / "codex-file-changes.json"
+    schema_file = scratch / "codex-file-changes-schema.json"
+    schema_file.write_text(json.dumps({
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["files"],
+        "properties": {
+            "files": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["path", "content"],
+                    "properties": {
+                        "path": {"type": "string"},
+                        "content": {"type": "string"},
+                    },
+                },
+            },
+        },
+    }, indent=2))
+    changes_json.unlink(missing_ok=True)
+    for path in (app / ".agents_tmp" / "codex-patch.json", app / ".agents_tmp" / "codex.patch"):
+        path.unlink(missing_ok=True)
+    command = [
+        codex,
+        "exec",
+        "--ephemeral",
+        "--skip-git-repo-check",
+        "--sandbox",
+        "read-only",
+        "-C",
+        str(app),
+        "--output-schema",
+        str(schema_file),
+        "-o",
+        str(changes_json),
+        "-",
+    ]
+    context = workspace_context_bundle(app)
+    bounded_prompt = (
+        "You are a tool-free coding fallback. Use only the embedded workspace files below; do not run shell "
+        "commands or attempt filesystem inspection. "
+        "Return JSON only. The `files` field must contain every file that should be created or replaced, "
+        "using paths relative to the current workspace root such as `src/App.tsx`. Return complete file "
+        "contents, not patches or excerpts. Do not include node_modules, dist, coverage, screenshots, or "
+        "runtime artifacts. Modify the app's existing source/design files directly; do not add broad CSS "
+        "override files, substring class selectors such as `[class*=\"...\"]`, or generic `!important` sweeps. "
+        "If changes are needed, `files` must not be empty.\n\n"
+        f"Task:\n{prompt}\n\n"
+        f"Workspace files:\n{context}"
+    )
+    result = subprocess.run(
+        command,
+        input=bounded_prompt,
+        text=True,
+        capture_output=True,
+        timeout=max(1, timeout),
+        check=False,
+    )
+    if result.returncode:
+        output = ((result.stdout or "") + (result.stderr or ""))[-4000:]
+        raise RunFailure(f"Codex CLI fallback failed: {output.strip()}")
+    try:
+        data = json.loads(changes_json.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        last_message.write_text(((result.stdout or "") + (result.stderr or ""))[-4000:])
+        raise RunFailure("Codex CLI fallback did not return valid file-change JSON") from exc
+    files = data.get("files") if isinstance(data, dict) else None
+    if not isinstance(files, list) or not files:
+        raise RunFailure("Codex CLI fallback returned no file changes")
+    excluded_parts = {"node_modules", "dist", "coverage", "playwright-report", "test-results"}
+    changed = False
+    for item in files:
+        if not isinstance(item, dict):
+            raise RunFailure("Codex CLI fallback returned an invalid file entry")
+        relative = item.get("path")
+        content = item.get("content")
+        if (
+            not isinstance(relative, str)
+            or not relative
+            or relative.startswith("/")
+            or ".." in Path(relative).parts
+            or any(part in excluded_parts for part in Path(relative).parts)
+            or not isinstance(content, str)
+        ):
+            raise RunFailure(f"Codex CLI fallback returned an unsafe file path: {relative!r}")
+        target = app / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        existing = target.read_text(errors="replace") if target.is_file() else None
+        if existing != content:
+            target.write_text(content)
+            changed = True
+    if not changed:
+        raise RunFailure("Codex CLI fallback returned unchanged file contents")
+
+
 def load_visual_review(app: Path) -> VisualReview:
     path = app / ".autodev" / "visual-review.json"
     try:
@@ -806,13 +961,71 @@ def promote_plan(app: Path) -> str:
 
 
 def planning_session(app: Path, requirement: str, driver: AgentDriver, deadline: float) -> str:
-    _execute_agent_task(app, driver, deadline, requirement, planning=True)
+    grant_sandbox_access(app)
+    with openhands_auth_volumes(driver) as auth_volumes:
+        workspace = LoopbackDockerWorkspace.create(app, extra_volumes=auth_volumes)
+        try:
+            with workspace:
+                try:
+                    driver.plan(workspace, requirement, agent_turn_timeout(driver, deadline))
+                except RunFailure:
+                    if not getattr(getattr(driver, "settings", None), "codex_cli_fallback", False):
+                        raise
+                    codex_cli_task(
+                        app,
+                        "Create the implementation plan for this requirement. Write it to .agents_tmp/PLAN.md "
+                        "and ensure it explicitly includes application goal, chosen stack, required features, "
+                        "implementation steps, acceptance criteria, and testing approach. Do not implement code. "
+                        "IMPORTANT: The UI/UX design is a core requirement, not an afterthought. Treat the user interface like a custom home renovation—do not settle for generic default templates. Ensure the implementation steps in the plan explicitly define a comprehensive design system (theme, fonts, custom CSS, layout, spacing, animations, responsive design, and product character/identity) and detail how each UI component will be crafted with high aesthetic standards.\n\n"
+                        f"Requirement:\n{requirement}",
+                        timeout=agent_turn_timeout(driver, deadline),
+                    )
+        finally:
+            normalize_permissions(app)
     return promote_plan(app)
 
 
 def development_session(app: Path, prompt: str, driver: AgentDriver, deadline: float) -> list[CheckResult]:
-    _execute_agent_task(app, driver, deadline, prompt)
-    return _verify_generated_application(app, driver)
+    before_status = git_status_snapshot(app)
+    grant_sandbox_access(app)
+    with openhands_auth_volumes(driver) as auth_volumes:
+        workspace = LoopbackDockerWorkspace.create(app, extra_volumes=auth_volumes)
+        try:
+            with workspace:
+                # The repository is host-owned after normalization. Trust only this
+                # mounted path in the disposable sandbox's own Git configuration.
+                workspace.execute_command("git config --global --add safe.directory /workspace")
+                used_fallback = False
+                try:
+                    driver.develop(workspace, prompt, agent_turn_timeout(driver, deadline))
+                except RunFailure:
+                    if not getattr(getattr(driver, "settings", None), "codex_cli_fallback", False):
+                        raise
+                    codex_cli_task(app, prompt, timeout=agent_turn_timeout(driver, deadline))
+                    used_fallback = True
+                after_status = git_status_snapshot(app)
+                if (
+                    before_status is not None
+                    and after_status == before_status
+                    and getattr(getattr(driver, "settings", None), "codex_cli_fallback", False)
+                ):
+                    if used_fallback:
+                        raise RunFailure("Development fallback produced no source changes")
+                    codex_cli_task(app, prompt, timeout=agent_turn_timeout(driver, deadline))
+                    after_fallback_status = git_status_snapshot(app)
+                    if after_fallback_status == before_status:
+                        raise RunFailure("Development fallback produced no source changes")
+        finally:
+            normalize_permissions(app)
+    commands = load_verification_manifest(app)
+    grant_sandbox_access(app)
+    verifier = LoopbackDockerWorkspace.create(app)
+    try:
+        with verifier:
+            timeout = getattr(getattr(driver, "settings", None), "command_timeout_seconds", 600)
+            return verify_in_workspace(verifier, app, commands, command_timeout=timeout)
+    finally:
+        normalize_permissions(app)
 
 
 def visual_review_session(app: Path, driver: AgentDriver, deadline: float) -> VisualReview:
@@ -1000,32 +1213,3 @@ def run_live(app: Path, requirement: str, settings: Settings, *, driver: AgentDr
 def secrets_to_redact(driver: AgentDriver) -> list[str]:
     getter = getattr(driver, "secrets_to_redact", None)
     return getter() if callable(getter) else []
-
-
-def _execute_agent_task(app: Path, driver: AgentDriver, deadline: float, prompt: str, *, planning: bool = False) -> None:
-    grant_sandbox_access(app)
-    with openhands_auth_volumes(driver) as auth_volumes:
-        workspace = LoopbackDockerWorkspace.create(app, extra_volumes=auth_volumes)
-        try:
-            with workspace:
-                timeout = agent_turn_timeout(driver, deadline)
-                if planning:
-                    driver.plan(workspace, prompt, timeout)
-                else:
-                    workspace.execute_command("git config --global --add safe.directory /workspace")
-                    driver.develop(workspace, prompt, timeout)
-        finally:
-            normalize_permissions(app)
-
-
-def _verify_generated_application(app: Path, driver: AgentDriver) -> list[CheckResult]:
-    commands = load_verification_manifest(app)
-    grant_sandbox_access(app)
-    workspace = LoopbackDockerWorkspace.create(app)
-    try:
-        with workspace:
-            settings = getattr(driver, "settings", None)
-            timeout = getattr(settings, "command_timeout_seconds", 600)
-            return verify_in_workspace(workspace, app, commands, command_timeout=timeout)
-    finally:
-        normalize_permissions(app)

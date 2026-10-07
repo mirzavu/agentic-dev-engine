@@ -6,7 +6,7 @@ import pytest
 
 from autodev.config import Settings
 
-from autodev.runner import (CheckResult, RunFailure, VerificationCommand, VisualArtifact, VisualIssue, VisualReview, append_visual_review_history, capture_visual_artifacts, development_session, git_checkpoint, implementation_prompt, load_verification_manifest, load_visual_review, redact, repair_prompt, report_text, run_live, safe_workspace, visual_fix_prompt, visual_review_prompt, visual_review_session)
+from autodev.runner import (CheckResult, RunFailure, VerificationCommand, VisualArtifact, VisualIssue, VisualReview, append_visual_review_history, capture_visual_artifacts, codex_cli_task, development_session, git_checkpoint, implementation_prompt, load_verification_manifest, load_visual_review, redact, repair_prompt, report_text, run_live, safe_workspace, visual_fix_prompt, visual_review_prompt, visual_review_session)
 from autodev.workspace import workspace_mount
 
 
@@ -112,6 +112,54 @@ def test_visual_review_prompt_uses_captured_artifacts(tmp_path):
     assert "score 0" in prompt
 
 
+def test_codex_cli_task_uses_workspace_sandbox(monkeypatch, tmp_path):
+    captured = {"commands": []}
+
+    def fake_run(argv, **kwargs):
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        captured["commands"].append(argv)
+        if argv[:2] == ["/usr/bin/codex", "exec"]:
+            captured["input"] = kwargs["input"]
+            output = Path(argv[argv.index("-o") + 1])
+            output.write_text(json.dumps({"files": [{"path": "README.md", "content": "changed\n"}]}))
+        return Result()
+
+    monkeypatch.setattr("autodev.runner.shutil.which", lambda name: "/usr/bin/codex" if name == "codex" else None)
+    monkeypatch.setattr("autodev.runner.subprocess.run", fake_run)
+
+    codex_cli_task(tmp_path, "Make a small change.", timeout=10)
+
+    codex_command = next(command for command in captured["commands"] if command[:2] == ["/usr/bin/codex", "exec"])
+    assert codex_command[:2] == ["/usr/bin/codex", "exec"]
+    assert "--sandbox" in codex_command
+    assert codex_command[codex_command.index("--sandbox") + 1] == "read-only"
+    assert codex_command[codex_command.index("-C") + 1] == str(tmp_path)
+    assert codex_command[-1] == "-"
+    assert "--output-schema" in codex_command
+    assert "Return JSON only" in captured["input"]
+    assert (tmp_path / "README.md").read_text() == "changed\n"
+
+
+def test_codex_cli_task_failure_is_reported(monkeypatch, tmp_path):
+    def fake_run(argv, **kwargs):
+        class Result:
+            returncode = 1
+            stdout = ""
+            stderr = "boom"
+
+        return Result()
+
+    monkeypatch.setattr("autodev.runner.shutil.which", lambda name: "/usr/bin/codex" if name == "codex" else None)
+    monkeypatch.setattr("autodev.runner.subprocess.run", fake_run)
+
+    with pytest.raises(RunFailure, match="Codex CLI fallback failed"):
+        codex_cli_task(tmp_path, "Change code.", timeout=10)
+
+
 def test_development_prompts_forbid_multi_heredoc_file_batches():
     guidance = "Do not create multiple files by pasting a large multi-heredoc shell script"
 
@@ -120,6 +168,50 @@ def test_development_prompts_forbid_multi_heredoc_file_batches():
     assert guidance in visual_fix_prompt(
         VisualReview(7, (VisualIssue("medium", "desktop", "controls", "Crowded", "Improve spacing"),))
     )
+
+
+def test_development_session_falls_back_after_no_op_agent(monkeypatch, tmp_path):
+    subprocess.run(["git", "-C", str(tmp_path), "init"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.email", "test@example.com"], check=True)
+    (tmp_path / "README.md").write_text("start\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-m", "start"], check=True, capture_output=True)
+
+    class FakeWorkspace:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute_command(self, *args, **kwargs):
+            class Result:
+                exit_code = 0
+                stdout = ""
+                stderr = ""
+
+            return Result()
+
+    class NoOpDriver:
+        settings = settings(fallback=True)
+
+        def develop(self, workspace, prompt, timeout):
+            return None
+
+    def fake_fallback(app, prompt, *, timeout):
+        (app / "README.md").write_text("changed\n")
+
+    monkeypatch.setattr("autodev.runner.LoopbackDockerWorkspace.create", lambda app, **kwargs: FakeWorkspace())
+    monkeypatch.setattr("autodev.runner.normalize_permissions", lambda app: None)
+    monkeypatch.setattr("autodev.runner.codex_cli_task", fake_fallback)
+    monkeypatch.setattr("autodev.runner.load_verification_manifest", lambda app: [VerificationCommand("test", ("true",))])
+    monkeypatch.setattr("autodev.runner.verify_in_workspace", lambda *args, **kwargs: [command("test", 0)])
+
+    results = development_session(tmp_path, "change files", NoOpDriver(), 9999999999)
+
+    assert results[-1].passed
+    assert (tmp_path / "README.md").read_text() == "changed\n"
 
 
 def test_existing_workspace_is_never_reset(tmp_path):
