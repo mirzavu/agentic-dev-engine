@@ -515,6 +515,55 @@ def codex_cli_task(app: Path, prompt: str, *, timeout: float) -> None:
         raise RunFailure("Codex CLI fallback returned unchanged file contents")
 
 
+def codex_cli_visual_review(app: Path, artifacts: tuple[VisualArtifact, ...], *, timeout: float) -> VisualReview:
+    codex = shutil.which("codex")
+    if not codex:
+        raise RunFailure("Codex CLI is required for fallback visual review")
+    visual_dir = app / VISUAL_ARTIFACTS_DIR
+    schema_path = visual_dir / "schema.json"
+    response_path = visual_dir / "codex-review.json"
+    schema_path.write_text(json.dumps(visual_review_schema(), indent=2))
+    if response_path.exists():
+        response_path.unlink()
+    command = [
+        codex,
+        "exec",
+        "--ephemeral",
+        "--skip-git-repo-check",
+        "--sandbox",
+        "workspace-write",
+        "-C",
+        str(app),
+        "--output-schema",
+        str(schema_path),
+        "-o",
+        str(response_path),
+    ]
+    for artifact in artifacts:
+        command.extend(["--image", str(artifact.path)])
+    command.append("-")
+    result = subprocess.run(
+        command,
+        input=codex_cli_visual_review_prompt_for_app(app),
+        text=True,
+        capture_output=True,
+        timeout=max(1, timeout),
+        check=False,
+    )
+    if result.returncode:
+        output = ((result.stdout or "") + (result.stderr or ""))[-4000:]
+        raise RunFailure(f"Codex CLI visual review failed: {output.strip()}")
+    try:
+        data = json.loads(response_path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        output = ((result.stdout or "") + (result.stderr or ""))[-4000:]
+        raise RunFailure(f"Codex CLI visual review did not return valid JSON: {output.strip()}") from exc
+    (app / ".autodev" / "visual-review.json").write_text(json.dumps(data, indent=2))
+    review = load_visual_review(app)
+    append_visual_review_history(app, review)
+    return review
+
+
 def load_visual_review(app: Path) -> VisualReview:
     path = app / ".autodev" / "visual-review.json"
     try:
@@ -1029,9 +1078,12 @@ def development_session(app: Path, prompt: str, driver: AgentDriver, deadline: f
 
 
 def visual_review_session(app: Path, driver: AgentDriver, deadline: float) -> VisualReview:
-    review_path = app / '.autodev' / 'visual-review.json'
+    review_path = app / ".autodev" / "visual-review.json"
     review_path.unlink(missing_ok=True)
-    timeout = min(max(1, deadline - time.monotonic()), getattr(getattr(driver, 'settings', None), 'visual_review_seconds', 180))
+    timeout = min(
+        max(1, deadline - time.monotonic()),
+        getattr(getattr(driver, "settings", None), "visual_review_seconds", 180),
+    )
     artifacts = capture_visual_artifacts(app, timeout=min(timeout, 60))
     grant_sandbox_access(app)
     failure: Exception | None = None
@@ -1049,9 +1101,22 @@ def visual_review_session(app: Path, driver: AgentDriver, deadline: float) -> Vi
         append_visual_review_history(app, review)
         return review
     except RunFailure as load_error:
-        if failure is not None:
-            raise RunFailure(f'OpenHands visual review failed: {failure}') from failure
-        raise
+        if not getattr(getattr(driver, "settings", None), "codex_cli_fallback", False):
+            if failure is not None:
+                raise RunFailure(f"OpenHands visual review failed: {failure}") from failure
+            raise
+        fallback_timeout = min(max(1, deadline - time.monotonic()), timeout)
+        try:
+            return codex_cli_visual_review(app, artifacts, timeout=fallback_timeout)
+        except Exception as fallback_error:
+            if failure is not None:
+                raise RunFailure(
+                    f"OpenHands visual review failed ({failure}); fallback visual review failed ({fallback_error})"
+                ) from fallback_error
+            raise RunFailure(
+                f"OpenHands visual review did not produce valid JSON ({load_error}); "
+                f"fallback visual review failed ({fallback_error})"
+            ) from fallback_error
 
 
 def implementation_prompt() -> str:

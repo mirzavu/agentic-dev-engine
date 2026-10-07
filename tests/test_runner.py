@@ -5,8 +5,12 @@ from pathlib import Path
 import pytest
 
 from autodev.config import Settings
-
-from autodev.runner import (CheckResult, RunFailure, VerificationCommand, VisualArtifact, VisualIssue, VisualReview, append_visual_review_history, capture_visual_artifacts, codex_cli_task, development_session, git_checkpoint, implementation_prompt, load_verification_manifest, load_visual_review, redact, repair_prompt, report_text, run_live, safe_workspace, visual_fix_prompt, visual_review_prompt, visual_review_session)
+from autodev.runner import (CheckResult, RunFailure, VerificationCommand, VisualArtifact, VisualIssue,
+                            VisualReview, append_visual_review_history, capture_visual_artifacts,
+                            codex_cli_task, codex_cli_visual_review, development_session, git_checkpoint,
+                            implementation_prompt, load_verification_manifest, load_visual_review, redact,
+                            repair_prompt, report_text, run_live, safe_workspace, visual_fix_prompt,
+                            visual_review_prompt, visual_review_session)
 from autodev.workspace import workspace_mount
 
 
@@ -112,6 +116,50 @@ def test_visual_review_prompt_uses_captured_artifacts(tmp_path):
     assert "score 0" in prompt
 
 
+def test_codex_cli_visual_review_writes_validated_json(monkeypatch, tmp_path):
+    visual_dir = tmp_path / ".autodev" / "visual"
+    visual_dir.mkdir(parents=True)
+    desktop = visual_dir / "desktop.png"
+    desktop.write_bytes(b"png")
+    artifact = VisualArtifact("desktop", desktop, "1440,1000")
+    append_visual_review_history(
+        tmp_path,
+        VisualReview(7, (VisualIssue("medium", "desktop", "hero", "Generic layout", "Add product character"),)),
+    )
+    captured = {}
+
+    def fake_run(argv, **kwargs):
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        captured["argv"] = argv
+        captured["input"] = kwargs["input"]
+        output = Path(argv[argv.index("-o") + 1])
+        output.write_text(json.dumps({
+            "score": 8,
+            "dimensions": {name: 8 for name in ("visual_hierarchy", "composition_density", "design_coherence", "task_flow_ux", "responsive_design", "product_character")},
+            "production_ready": True,
+            "issues": [],
+        }))
+        return Result()
+
+    monkeypatch.setattr("autodev.runner.shutil.which", lambda name: "/usr/bin/codex" if name == "codex" else None)
+    monkeypatch.setattr("autodev.runner.subprocess.run", fake_run)
+
+    review = codex_cli_visual_review(tmp_path, (artifact,), timeout=10)
+
+    assert review.approved
+    assert "--image" in captured["argv"]
+    assert captured["argv"][-1] == "-"
+    assert "senior product-design reviewer" in captured["input"]
+    assert "Generic layout" in captured["input"]
+    assert "Add product character" in captured["input"]
+    assert str(desktop) in captured["argv"]
+    assert (tmp_path / ".autodev" / "visual-review.json").is_file()
+
+
 def test_codex_cli_task_uses_workspace_sandbox(monkeypatch, tmp_path):
     captured = {"commands": []}
 
@@ -212,6 +260,99 @@ def test_development_session_falls_back_after_no_op_agent(monkeypatch, tmp_path)
 
     assert results[-1].passed
     assert (tmp_path / "README.md").read_text() == "changed\n"
+
+
+def test_visual_review_session_falls_back_when_openhands_crashes(monkeypatch, tmp_path):
+    artifact_dir = tmp_path / ".autodev" / "visual"
+    artifact_dir.mkdir(parents=True)
+    artifact = VisualArtifact("desktop", artifact_dir / "desktop.png", "1440,1000")
+    artifact.path.write_bytes(b"png")
+
+    class FakeWorkspace:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeDriver:
+        settings = settings(fallback=True)
+
+        def review_visual(self, workspace, prompt, timeout):
+            raise RuntimeError("ACP down")
+
+    monkeypatch.setattr("autodev.runner.capture_visual_artifacts", lambda *args, **kwargs: (artifact,))
+    monkeypatch.setattr("autodev.runner.LoopbackDockerWorkspace.create", lambda app, **kwargs: FakeWorkspace())
+    monkeypatch.setattr("autodev.runner.normalize_permissions", lambda app: None)
+    monkeypatch.setattr("autodev.runner.codex_cli_visual_review", lambda *args, **kwargs: VisualReview(9, ()))
+
+    review = visual_review_session(tmp_path, FakeDriver(), 9999999999)
+
+    assert review.score == 9
+
+
+def test_visual_review_session_does_not_reuse_stale_review(monkeypatch, tmp_path):
+    autodev = tmp_path / ".autodev"
+    autodev.mkdir()
+    (autodev / "visual-review.json").write_text(json.dumps({
+        "score": 10,
+        "dimensions": {name: 10 for name in ("visual_hierarchy", "composition_density", "design_coherence", "task_flow_ux", "responsive_design", "product_character")},
+        "production_ready": True,
+        "issues": [],
+    }))
+    artifact = VisualArtifact("desktop", autodev / "visual" / "desktop.png", "1440,1000")
+    artifact.path.parent.mkdir()
+    artifact.path.write_bytes(b"png")
+
+    class FakeWorkspace:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class CrashingDriver:
+        settings = settings(fallback=True)
+
+        def review_visual(self, workspace, prompt, timeout):
+            raise RuntimeError("ACP down")
+
+    monkeypatch.setattr("autodev.runner.capture_visual_artifacts", lambda *args, **kwargs: (artifact,))
+    monkeypatch.setattr("autodev.runner.LoopbackDockerWorkspace.create", lambda app, **kwargs: FakeWorkspace())
+    monkeypatch.setattr("autodev.runner.normalize_permissions", lambda app: None)
+    monkeypatch.setattr("autodev.runner.codex_cli_visual_review", lambda *args, **kwargs: VisualReview(4, ()))
+
+    review = visual_review_session(tmp_path, CrashingDriver(), 9999999999)
+
+    assert review.score == 4
+
+
+def test_visual_review_session_does_not_fallback_by_default(monkeypatch, tmp_path):
+    artifact_dir = tmp_path / ".autodev" / "visual"
+    artifact_dir.mkdir(parents=True)
+    artifact = VisualArtifact("desktop", artifact_dir / "desktop.png", "1440,1000")
+    artifact.path.write_bytes(b"png")
+
+    class FakeWorkspace:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeDriver:
+        settings = settings()
+
+        def review_visual(self, workspace, prompt, timeout):
+            raise RuntimeError("OpenHands down")
+
+    monkeypatch.setattr("autodev.runner.capture_visual_artifacts", lambda *args, **kwargs: (artifact,))
+    monkeypatch.setattr("autodev.runner.LoopbackDockerWorkspace.create", lambda app, **kwargs: FakeWorkspace())
+    monkeypatch.setattr("autodev.runner.normalize_permissions", lambda app: None)
+    monkeypatch.setattr("autodev.runner.codex_cli_visual_review", lambda *args, **kwargs: pytest.fail("fallback should not run"))
+
+    with pytest.raises(RunFailure, match="OpenHands visual review failed"):
+        visual_review_session(tmp_path, FakeDriver(), 9999999999)
 
 
 def test_existing_workspace_is_never_reset(tmp_path):
