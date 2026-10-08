@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="860" viewBox="0 0 1280 860" role="img" aria-labelledby="title description">
+<title id="title">Agentic Development Workflow</title>
+<desc id="description">An app brief flows through planning, development, mechanical checks, and visual review. Failed checks trigger repairs, and visual findings trigger refinements and repeat verification. Accepted runs produce checked application output and checkpoints. Every run ends with a report. Defaults allow two functional repairs, three visual refinements, and a 45-minute overall budget.</desc>
+<defs>
+<linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#f8fafc"/><stop offset="1" stop-color="#ffffff"/></linearGradient>
+<marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M1 1 6 4 1 7" fill="none" stroke="#147d64" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></marker>
+<marker id="repair" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M1 1 6 4 1 7" fill="none" stroke="#b45309" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></marker>
+<style>
+text {font-family:Arial,Helvetica,sans-serif}
+.overline {font-size:15px;letter-spacing:3px;fill:#4059a4;font-weight:700}
+.heading {font-size:39px;fill:#18212f;font-weight:700}
+.subtitle {font-size:20px;fill:#475569}
+.card {fill:#ffffff;stroke:#cbd5e1;stroke-width:1.5}
+.number {font-size:14px;fill:#4059a4;font-weight:700;letter-spacing:2px}
+.label {font-size:23px;fill:#18212f;font-weight:700}
+.body {font-size:16px;fill:#475569}
+.feedback {fill:none;stroke:#b45309;stroke-width:2;marker-end:url(#repair)}
+.forward {fill:none;stroke:#147d64;stroke-width:2.2;marker-end:url(#arrow)}
+.small {font-size:15px;fill:#b45309}
+</style></defs>
+<rect width="1280" height="860" rx="24" fill="url(#bg)"/>
+<rect x="1" y="1" width="1278" height="858" rx="23" fill="none" stroke="#d8dee7"/>
+<text x="48" y="114" class="heading">Agentic Development Workflow</text>
+<text x="48" y="150" class="subtitle">Agents do the work. Commands and screenshots provide the evidence.</text>
+<path d="M298 287H358" class="forward"/><path d="M608 287H668" class="forward"/><path d="M918 287H978" class="forward"/>
+<path d="M1103 352V450" class="forward"/><text x="1120" y="411" font-size="15" fill="#147d64">Checks pass</text>
+<path d="M1035 352V376Q1035 390 1021 390H784Q770 390 770 376V352" class="feedback"/>
+<rect x="799" y="378" width="199" height="27" rx="13" fill="#f8fafc"/><text x="898" y="397" text-anchor="middle" class="small">Failed checks: repair</text>
+<path d="M978 524H608" class="forward"/><rect x="690" y="507" width="149" height="30" rx="15" fill="#edf8f2"/><text x="764" y="528" text-anchor="middle" font-size="16" fill="#147d64">Quality gates pass</text>
+<path d="M978 576H964Q948 576 948 560V346Q948 330 932 330H918" class="feedback"/><rect x="938" y="609" width="230" height="30" rx="12" fill="#f8fafc"/><text x="1053" y="630" text-anchor="middle" class="small">Refine UI + recheck</text>
+
+<g data-card="Your brief"><rect x="48" y="212" width="250" height="140" rx="16" class="card"/>
+<text x="68" y="240" class="number">01 / INPUT</text>
+<text x="68" y="277" class="label">Your brief</text>
+<text x="68" y="308" class="body">Features + acceptance criteria</text>
+<text x="68" y="333" class="body">Describe the app you want.</text>
+</g>
+<g data-card="Planning agent"><rect x="358" y="212" width="250" height="140" rx="16" class="card"/>
+<text x="378" y="240" class="number">02 / PLAN</text>
+<text x="378" y="277" class="label">Planning agent</text>
+<text x="378" y="308" class="body">Stack, design, steps, tests</text>
+<text x="378" y="333" class="body">Writes TASK.md.</text>
+</g>
+<g data-card="Development agent"><rect x="668" y="212" width="250" height="140" rx="16" class="card"/>
+<text x="688" y="240" class="number">03 / BUILD</text>
+<text x="688" y="277" class="label">Development agent</text>
+<text x="688" y="308" class="body">Implements the plan in Docker.</text>
+<text x="688" y="333" class="body">App source + tests + manifest</text>
+</g>
+<g data-card="Mechanical checks"><rect x="978" y="212" width="250" height="140" rx="16" class="card"/>
+<text x="998" y="240" class="number">04 / VERIFY</text>
+<text x="998" y="277" class="label">Mechanical checks</text>
+<text x="998" y="308" class="body">Install · test · build*</text>
+<text x="998" y="333" class="body">Exit codes + failure output</text>
+</g>
+<g data-card="Visual reviewer"><rect x="978" y="450" width="250" height="148" rx="16" class="card"/>
+<text x="998" y="478" class="number">05 / REVIEW</text>
+<text x="998" y="515" class="label">Visual reviewer</text>
+<text x="998" y="546" class="body">Desktop + mobile screenshots</text>
+<text x="998" y="571" class="body">Scores + actionable findings</text>
+</g>
+<g data-card="Checked output"><rect x="358" y="450" width="250" height="148" rx="16" fill="#ecfdf3" stroke="#86c5a9" stroke-width="1.5"/>
+<text x="378" y="478" class="number">06 / OUTPUT</text>
+<text x="378" y="515" class="label">Checked output</text>
+<text x="378" y="546" class="body">Application files + checkpoints</text>
+<text x="378" y="571" class="body">An inspectable run report</text>
+</g>
+<text x="48" y="480" font-size="18" font-weight="700" fill="#475569">A loop with a finish line.</text>
+<text x="48" y="513" class="body">Budget exhausted?</text><text x="48" y="537" class="body">Stop and report the failure.</text>
+<text x="48" y="572" font-size="14" fill="#64748b">* Build command when declared.</text>
+<rect x="48" y="656" width="1180" height="133" rx="16" fill="#f1f5f9" stroke="#d5dfe9"/>
+<text x="72" y="688" class="overline" style="font-size:13px;letter-spacing:2px">DEFAULT EXECUTION BOUNDS</text>
+<text x="72" y="734" font-size="29" font-weight="700" fill="#18212f">2 repairs</text><text x="72" y="765" class="body">Shared functional repair budget</text>
+<path d="M413 708V768" stroke="#d5dfe9"/><text x="446" y="734" font-size="29" font-weight="700" fill="#18212f">3 refinements</text><text x="446" y="765" class="body">Visual feedback rounds</text>
+<path d="M794 708V768" stroke="#d5dfe9"/><text x="827" y="734" font-size="29" font-weight="700" fill="#18212f">45 min</text><text x="827" y="765" class="body">Overall run budget</text>
+<text x="48" y="828" font-size="16" fill="#475569">OpenHands agents · isolated Docker sessions · host-side screenshots · Git checkpoints</text>
+</svg>
